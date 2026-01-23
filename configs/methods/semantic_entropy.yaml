@@ -1,0 +1,4 @@
+# Semantic Entropy Stopping Rule
+method: semantic_entropy
+k_samples: 8
+entropy_threshold: 0.5

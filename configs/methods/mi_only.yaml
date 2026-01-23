@@ -1,0 +1,4 @@
+# MI-Only Stopping Rule (without robustness)
+method: mi_only
+k_samples: 6
+mi_threshold: 0.3

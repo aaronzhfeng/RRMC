@@ -1,0 +1,9 @@
+# Robust MI Stopping Rule (RRMC)
+method: robust_mi
+k_samples: 4
+threshold: 0.3  # Default, overridden by calibration
+use_diversity_sampling: true
+regime: normal
+variants:
+  - base
+  - skeptical

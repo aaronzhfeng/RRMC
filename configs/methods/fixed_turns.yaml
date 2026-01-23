@@ -1,0 +1,3 @@
+# Fixed Turns Stopping Rule
+method: fixed_turns
+fixed_turns: 10
