@@ -1,4 +1,6 @@
 numpy
 scipy
 requests
+pyyaml
+fire
 sentence-transformers

@@ -20,14 +20,36 @@ The core infrastructure for the Minimum Viable Experiment (MVE) is implemented a
 
 | Module | File | Description |
 |--------|------|-------------|
+| **Entry Point** | `run.py` | Config-based CLI entry point |
+| **Config** | `config.py` | YAML loading, merging, and Config class |
+| **Pipeline** | `pipeline.py` | Experiment orchestration |
 | **LLM Wrapper** | `rrmc/core/llm.py` | OpenRouter API client with token tracking |
 | **Environment** | `rrmc/core/environment.py` | AR-Bench wrapper (DC/SP/GN) with reset/step/get_state |
 | **Clustering** | `rrmc/core/clustering.py` | Semantic clustering + optional entailment refinement |
 | **MI Estimator** | `rrmc/core/mi_estimator.py` | Self-revision MI + Robust MI (max over variants) |
 | **Calibration** | `rrmc/core/calibration.py` | Clopper-Pearson UCB threshold selection |
-| **Baselines** | `rrmc/baselines/stopping_rules.py` | Fixed, self-consistency, entropy, MI-only, robust MI |
+| **Methods** | `rrmc/methods/` | Stopping rules + registry |
 | **Evaluator** | `rrmc/evaluation/evaluator.py` | Episode runner, calibration collection, comparison |
-| **CLI** | `run_rrmc.py` | Main entry point with calibration mode |
+
+### Configuration Structure
+
+```
+configs/
+├── base.yaml              # Default settings
+├── providers/
+│   └── openrouter.yaml    # API settings
+├── methods/
+│   ├── fixed_turns.yaml
+│   ├── self_consistency.yaml
+│   ├── semantic_entropy.yaml
+│   ├── mi_only.yaml
+│   └── robust_mi.yaml
+└── experiments/
+    ├── mve_dc_normal.yaml
+    ├── mve_dc_homogeneous.yaml
+    ├── mve_sp_normal.yaml
+    └── ablation_no_diversity.yaml
+```
 
 ---
 
@@ -100,25 +122,41 @@ Required dependencies:
 - `numpy` — Numerical computations
 - `scipy` — Statistical functions (Spearman correlation, Clopper-Pearson UCB)
 - `requests` — HTTP client for OpenRouter API
+- `pyyaml` — YAML configuration loading
+- `fire` — CLI argument parsing (optional, has argparse fallback)
 - `sentence-transformers` — Semantic embeddings for clustering (optional, falls back to exact matching)
 
 ---
 
 ## How to Run
 
-### Quick Test (Fixed Thresholds)
+### Using Config-Based Entry Point (Recommended)
+
 ```bash
-python3 run_rrmc.py --n_puzzles 1 --methods fixed_turns --max_turns 3 --task dc
+# List available experiments
+python run.py --list
+
+# Run MVE on Detective Cases
+python run.py mve_dc_normal
+
+# Run with CLI overrides
+python run.py mve_dc_normal --n_train 5 --n_test 3 --max_turns 5
+
+# Run stress test with homogeneous decoding
+python run.py mve_dc_homogeneous
+
+# Run on Situation Puzzles
+python run.py mve_sp_normal
 ```
 
-### Calibrated RRMC Pipeline
-```bash
-python3 run_rrmc.py --calibrate --n_train 10 --n_test 5 --task dc --target_error 0.10
-```
+### Using Legacy CLI (run_rrmc_legacy.py)
 
-### Load Existing Calibration
 ```bash
-python3 run_rrmc.py --load_calibration results/calibration_dc_xxx.json --n_test 5
+# Quick test
+python3 run_rrmc_legacy.py --n_puzzles 1 --methods fixed_turns --max_turns 3 --task dc
+
+# Calibrated pipeline
+python3 run_rrmc_legacy.py --calibrate --n_train 10 --n_test 5 --task dc
 ```
 
 ---
