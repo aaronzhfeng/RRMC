@@ -1,0 +1,22 @@
+# Robust MI (RRMC): Multi-variant MI with risk-controlled calibrated threshold
+experiment_name: robust_mi
+task: dc
+data_subset: test
+
+calibrate: false       # Set true for calibration phase
+n_puzzles: 20
+
+methods:
+  - robust_mi
+
+# Turn settings
+max_turns: 25
+
+# Robust MI parameters
+k_samples: 4                      # Samples per variant (fewer for efficiency)
+threshold: 0.3                    # MI threshold (will be calibrated if calibrate=true)
+variants:                         # Prompt variants for MVE
+  - base
+  - skeptical
+regime: normal                    # "normal" or "homogeneous" decoding
+use_diversity_sampling: true      # Enable diversity sampling

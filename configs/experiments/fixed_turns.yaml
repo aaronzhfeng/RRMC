@@ -1,0 +1,20 @@
+# Fixed Turns: Naive baseline that asks for fixed number of turns then answers
+experiment_name: fixed_turns
+task: dc
+data_subset: test
+
+# No calibration - just run and compare methods
+calibrate: false
+n_puzzles: 20
+
+# Methods to test
+methods:
+  - fixed_turns
+
+# Turn settings
+max_turns: 25      # Maximum episode length
+fixed_turns: 25    # When fixed_turns method stops (overrides method config)
+
+# Sampling (use defaults from base.yaml)
+# temperature: 0.7
+# top_p: 0.95

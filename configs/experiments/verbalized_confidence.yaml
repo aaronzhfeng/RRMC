@@ -1,0 +1,16 @@
+# Verbalized Confidence: Stop when model's self-reported confidence >= threshold
+experiment_name: verbalized_confidence
+task: dc
+data_subset: test
+
+calibrate: false
+n_puzzles: 20
+
+methods:
+  - verbalized_confidence
+
+# Turn settings
+max_turns: 25
+
+# Verbalized confidence parameters
+confidence_threshold: 8.0  # Stop when model reports confidence >= 8/10

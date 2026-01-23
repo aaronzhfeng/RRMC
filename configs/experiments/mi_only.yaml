@@ -1,0 +1,17 @@
+# MI-Only: Single-variant self-revision MI with fixed threshold (no robustness)
+experiment_name: mi_only
+task: dc
+data_subset: test
+
+calibrate: false
+n_puzzles: 20
+
+methods:
+  - mi_only
+
+# Turn settings
+max_turns: 25
+
+# MI parameters
+k_samples: 6          # Number of samples for MI estimation
+mi_threshold: 0.3     # Stop when MI <= this value

@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from tqdm import tqdm
+
 from config import Config, get_method_config
 from rrmc.core.llm import LLMWrapper, load_api_key_from_env_file
 from rrmc.core.environment import TaskType
@@ -52,10 +54,62 @@ class Pipeline:
         self._init_llm()
         self._init_evaluator()
 
+        # Estimate API calls and set up progress bar
+        estimated_calls = self._estimate_api_calls()
+        verbose = self.config.get("verbose", True)
+        
+        self.pbar = tqdm(
+            total=estimated_calls,
+            desc="API calls",
+            unit="call",
+            disable=not verbose,
+        )
+        self.llm.progress_callback = self.pbar.update
+
+        try:
+            if self.config.get("calibrate", False):
+                return self._run_calibration_pipeline()
+            else:
+                return self._run_comparison_pipeline()
+        finally:
+            self.pbar.close()
+
+    def _estimate_api_calls(self) -> int:
+        """
+        Estimate total API calls for progress bar.
+        
+        This is an upper bound estimate based on:
+        - n_puzzles × max_turns × (1 + k_samples) for sampling methods
+        - Additional calls for calibration phase if enabled
+        """
+        max_turns = self.config.get("max_turns", 25)
+        k_samples = self.config.get("k_samples", 4)
+        
         if self.config.get("calibrate", False):
-            return self._run_calibration_pipeline()
+            n_train = self.config.get("n_train", 20)
+            n_test = self.config.get("n_test", 10)
+            methods = self.config.get("methods", ["fixed_turns", "self_consistency", "mi_only"])
+            n_methods = len(methods) + 1  # +1 for calibrated RRMC
+            
+            # Calibration: n_train puzzles, each turn has question + MI sampling
+            # MI sampling: k_samples × n_variants
+            n_variants = len(self.config.get("variants", ["base", "skeptical"]))
+            calib_calls = n_train * max_turns * (1 + k_samples * n_variants)
+            
+            # Evaluation: n_test puzzles × n_methods × (calls per method)
+            # Rough estimate: each method averages ~(1 + k_samples) calls per turn
+            eval_calls = n_test * n_methods * max_turns * (1 + k_samples)
+            
+            return calib_calls + eval_calls
         else:
-            return self._run_comparison_pipeline()
+            n_puzzles = self.config.get("n_puzzles", 5)
+            methods = self.config.get("methods", ["fixed_turns"])
+            n_methods = len(methods)
+            
+            # Each method: n_puzzles × max_turns × (1 + avg_samples)
+            # fixed_turns: 1 call/turn, others: 1 + k_samples calls/turn
+            avg_samples = k_samples if n_methods > 1 else 0
+            return n_puzzles * n_methods * max_turns * (1 + avg_samples)
 
     def _init_llm(self):
         """Initialize LLM wrapper."""
@@ -77,14 +131,20 @@ class Pipeline:
             raise ValueError("No API key found. Set OPENROUTER_API_KEY or provide in config.")
 
         model = self.config.get("policy_model", "qwen/qwen3-8b")
+        max_workers = self.config.get("max_workers", 8)
+        provider = self.config.get("provider", None)
+        
         if verbose:
-            print(f"Initializing LLM: {model}")
+            provider_str = f", provider={provider.get('order', ['auto'])[0]}" if provider else ""
+            print(f"Initializing LLM: {model} (max_workers={max_workers}{provider_str})")
 
         self.llm = LLMWrapper(
             api_key=api_key,
             model=model,
             default_temperature=self.config.get("temperature", 0.7),
             default_top_p=self.config.get("top_p", 0.95),
+            max_workers=max_workers,
+            provider=provider,
         )
 
     def _init_evaluator(self):
@@ -114,6 +174,8 @@ class Pipeline:
             print(f"Task: {task_type.value}")
             print(f"Data: {test_path}")
 
+        max_workers = self.config.get("max_workers", 8)
+        
         self.evaluator = RRMCEvaluator(
             llm=self.llm,
             data_path=test_path,
@@ -121,6 +183,7 @@ class Pipeline:
             max_turns=self.config.get("max_turns", 25),
             output_dir=self.config.get("output_dir", "results"),
             regime=self.config.get("regime", "normal"),
+            max_workers=max_workers,
         )
 
         # Initialize train evaluator if calibrating
@@ -141,6 +204,7 @@ class Pipeline:
                     max_turns=self.config.get("max_turns", 25),
                     output_dir=self.config.get("output_dir", "results"),
                     regime=self.config.get("regime", "normal"),
+                    max_workers=max_workers,
                 )
             else:
                 self.train_evaluator = self.evaluator
@@ -314,7 +378,10 @@ class Pipeline:
         return {"evaluation": results}
 
     def _create_method(self, method_name: str, method_cfg: Dict[str, Any]):
-        """Create a stopping method with merged config."""
+        """Create a stopping method with merged config.
+        
+        Priority: experiment config > method config > defaults
+        """
         # Base kwargs
         kwargs = {
             "llm": self.llm,
@@ -325,21 +392,42 @@ class Pipeline:
         if method_name in ["self_consistency", "semantic_entropy", "mi_only", "robust_mi"]:
             kwargs["clusterer"] = self.evaluator.clusterer
 
-        # Method-specific defaults
+        # Method-specific settings (experiment config overrides method config)
         if method_name == "fixed_turns":
-            kwargs["fixed_turns"] = method_cfg.get("fixed_turns", 10)
+            # Allow experiment config to override fixed_turns
+            kwargs["fixed_turns"] = self.config.get(
+                "fixed_turns", method_cfg.get("fixed_turns", 10)
+            )
         elif method_name == "self_consistency":
-            kwargs["k_samples"] = method_cfg.get("k_samples", 8)
-            kwargs["consistency_threshold"] = method_cfg.get("consistency_threshold", 0.7)
+            kwargs["k_samples"] = self.config.get(
+                "k_samples", method_cfg.get("k_samples", 8)
+            )
+            kwargs["consistency_threshold"] = self.config.get(
+                "consistency_threshold", method_cfg.get("consistency_threshold", 0.7)
+            )
         elif method_name == "semantic_entropy":
-            kwargs["k_samples"] = method_cfg.get("k_samples", 8)
-            kwargs["entropy_threshold"] = method_cfg.get("entropy_threshold", 0.5)
+            kwargs["k_samples"] = self.config.get(
+                "k_samples", method_cfg.get("k_samples", 8)
+            )
+            kwargs["entropy_threshold"] = self.config.get(
+                "entropy_threshold", method_cfg.get("entropy_threshold", 0.5)
+            )
+        elif method_name == "verbalized_confidence":
+            kwargs["confidence_threshold"] = self.config.get(
+                "confidence_threshold", method_cfg.get("confidence_threshold", 8.0)
+            )
         elif method_name == "mi_only":
-            kwargs["k_samples"] = method_cfg.get("k_samples", 6)
-            kwargs["mi_threshold"] = method_cfg.get("mi_threshold", 0.3)
+            kwargs["k_samples"] = self.config.get(
+                "k_samples", method_cfg.get("k_samples", 6)
+            )
+            kwargs["mi_threshold"] = self.config.get(
+                "mi_threshold", method_cfg.get("mi_threshold", 0.3)
+            )
         elif method_name == "robust_mi":
             kwargs["k_samples"] = self.config.get("k_samples", method_cfg.get("k_samples", 4))
-            kwargs["threshold"] = method_cfg.get("threshold", 0.3)
+            kwargs["threshold"] = self.config.get(
+                "threshold", method_cfg.get("threshold", 0.3)
+            )
             kwargs["use_diversity_sampling"] = self.config.get(
                 "use_diversity_sampling",
                 method_cfg.get("use_diversity_sampling", True)

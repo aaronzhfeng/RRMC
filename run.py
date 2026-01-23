@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.13
 """
 RRMC - Risk-Controlled Robust-MI Active Inquiry
 
@@ -51,6 +51,8 @@ def main(
     # MI settings
     k_samples: Optional[int] = None,
     regime: Optional[str] = None,
+    # Concurrency settings
+    max_workers: Optional[int] = None,
     # Output settings
     output_dir: Optional[str] = None,
     verbose: bool = True,
@@ -71,6 +73,7 @@ def main(
         target_error: Target error rate for calibration
         k_samples: Number of samples for MI estimation
         regime: Decoding regime (normal, homogeneous)
+        max_workers: Max concurrent API calls (default: 8)
         output_dir: Output directory for results
         verbose: Print verbose output
         quiet: Suppress output
@@ -109,6 +112,8 @@ def main(
         overrides["k_samples"] = k_samples
     if regime is not None:
         overrides["regime"] = regime
+    if max_workers is not None:
+        overrides["max_workers"] = max_workers
     if output_dir is not None:
         overrides["output_dir"] = output_dir
 

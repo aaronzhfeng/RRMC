@@ -182,16 +182,16 @@ class SelfConsistencyStopping(BaseStoppingRule):
                 prediction=self.get_best_answer(task_type, state),
             )
 
-        # Sample k answers
+        # Sample k answers (parallel)
         prompt = self._get_answer_prompt(task_type, state)
-        answers = []
-        for _ in range(self.k_samples):
-            response = self.llm.generate(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-                max_tokens=256,
-            )
-            answers.append(self._parse_answer(response.content, task_type))
+        responses = self.llm.sample_n(
+            messages=[{"role": "user", "content": prompt}],
+            n=self.k_samples,
+            temperature=self.temperature,
+            max_tokens=256,
+            parallel=True,
+        )
+        answers = [self._parse_answer(r.content, task_type) for r in responses]
 
         self._last_answers = answers
 
@@ -359,16 +359,16 @@ class SemanticEntropyStopping(BaseStoppingRule):
                 prediction=self.get_best_answer(task_type, state),
             )
 
-        # Sample k answers
+        # Sample k answers (parallel)
         prompt = self._get_answer_prompt(task_type, state)
-        answers = []
-        for _ in range(self.k_samples):
-            response = self.llm.generate(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-                max_tokens=256,
-            )
-            answers.append(self._parse_answer(response.content, task_type))
+        responses = self.llm.sample_n(
+            messages=[{"role": "user", "content": prompt}],
+            n=self.k_samples,
+            temperature=self.temperature,
+            max_tokens=256,
+            parallel=True,
+        )
+        answers = [self._parse_answer(r.content, task_type) for r in responses]
 
         self._last_answers = answers
 

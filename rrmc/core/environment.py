@@ -204,10 +204,15 @@ The investigation focuses on five suspects, one of whom is the true murderer:
     def _reset_gn(self) -> Dict[str, Any]:
         """Reset for Guessing Numbers task."""
         puzzle = self.current_puzzle
+        # GN data can be just a string (the secret) or a dict
+        if isinstance(puzzle, str):
+            secret = puzzle
+        else:
+            secret = puzzle.get("secret", puzzle.get("answer", str(puzzle)))
         return {
             "task_type": "GN",
             "rules": "Guess a 4-digit number with unique digits. You'll receive bulls (correct digit and position) and cows (correct digit, wrong position).",
-            "ground_truth": puzzle.get("secret", puzzle.get("answer", "")),
+            "ground_truth": secret,
         }
 
     def step(self, action: Any) -> StepResult:
@@ -322,19 +327,28 @@ The investigation focuses on five suspects, one of whom is the true murderer:
             recall = len(intersection) / len(true_chars)
             f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
 
+        # SP uses F1 threshold for correctness (typically F1 > 0.5 is considered correct)
+        correct = f1 > 0.5
+
         return StepResult(
             observation=f"Your explanation submitted.",
             done=True,
             info={
-                "f1_score": f1,
+                "correct": correct,
+                "prediction": answer,
                 "ground_truth": ground_truth,
+                "f1_score": f1,
                 "turns_used": self.turn,
             }
         )
 
     def _evaluate_gn_answer(self, answer: str) -> StepResult:
         """Evaluate GN answer."""
-        secret = self.current_puzzle.get("secret", self.current_puzzle.get("answer", ""))
+        puzzle = self.current_puzzle
+        if isinstance(puzzle, str):
+            secret = puzzle
+        else:
+            secret = puzzle.get("secret", puzzle.get("answer", ""))
 
         # Parse and validate guess
         guess = re.sub(r'[^0-9]', '', answer)[:4]
@@ -346,8 +360,10 @@ The investigation focuses on five suspects, one of whom is the true murderer:
             done=True,
             info={
                 "correct": correct,
-                "guess": guess,
-                "secret": secret,
+                "prediction": guess,
+                "ground_truth": secret,
+                "guess": guess,      # Keep for backwards compatibility
+                "secret": secret,    # Keep for backwards compatibility
                 "turns_used": self.turn,
             }
         )
@@ -471,7 +487,11 @@ Only answer with the single word."""
     def _ask_gn(self, action: ActionASK) -> StepResult:
         """Make a guess for GN (symbolic feedback)."""
         guess = re.sub(r'[^0-9]', '', action.question)[:4]
-        secret = self.current_puzzle.get("secret", self.current_puzzle.get("answer", ""))
+        puzzle = self.current_puzzle
+        if isinstance(puzzle, str):
+            secret = puzzle
+        else:
+            secret = puzzle.get("secret", puzzle.get("answer", ""))
 
         # Validate guess has 4 unique digits
         if len(guess) != 4 or len(set(guess)) != 4:
@@ -571,6 +591,8 @@ Only answer with the single word."""
             return self.current_puzzle.get("explanation",
                     self.current_puzzle.get("bottom", ""))
         elif self.task_type == TaskType.GN:
-            return self.current_puzzle.get("secret",
-                    self.current_puzzle.get("answer", ""))
+            puzzle = self.current_puzzle
+            if isinstance(puzzle, str):
+                return puzzle
+            return puzzle.get("secret", puzzle.get("answer", ""))
         return None

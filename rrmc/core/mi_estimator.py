@@ -203,35 +203,51 @@ class SelfRevisionMI:
         initial_prompt: str,
         revision_prompt_template: str,
     ) -> Tuple[List[str], List[str], Optional[List[float]]]:
-        """Standard sampling without diversity filtering."""
-        initial_answers = []
-        revised_answers = []
+        """Standard sampling without diversity filtering (parallel)."""
+        # Step 1: Generate k initial answers in parallel
+        initial_responses = self.llm.sample_n(
+            messages=[{"role": "user", "content": initial_prompt}],
+            n=self.k_samples,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            max_tokens=256,
+            parallel=True,
+        )
+        initial_raw = [r.content for r in initial_responses]
+        initial_answers = [self._parse_answer(y, task_type) for y in initial_raw]
 
-        for _ in range(self.k_samples):
-            # Generate initial answer
-            y0_response = self.llm.generate(
-                messages=[{"role": "user", "content": initial_prompt}],
-                temperature=self.temperature,
-                top_p=self.top_p,
-                max_tokens=256,
-            )
-            y0 = y0_response.content
-            y0_parsed = self._parse_answer(y0, task_type)
-            initial_answers.append(y0_parsed)
-
-            # Generate revision
+        # Step 2: Build revision prompts for each initial answer
+        revision_prompts = []
+        for y0 in initial_raw:
             revision_prompt = revision_prompt_template.format(initial_answer=y0)
             full_revision_prompt = initial_prompt + "\n\n" + revision_prompt
+            revision_prompts.append(full_revision_prompt)
 
-            y1_response = self.llm.generate(
-                messages=[{"role": "user", "content": full_revision_prompt}],
+        # Step 3: Generate k revised answers in parallel
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def generate_revision(prompt):
+            return self.llm.generate(
+                messages=[{"role": "user", "content": prompt}],
                 temperature=self.temperature,
                 top_p=self.top_p,
                 max_tokens=256,
             )
-            y1 = y1_response.content
-            y1_parsed = self._parse_answer(y1, task_type)
-            revised_answers.append(y1_parsed)
+
+        revised_responses = [None] * self.k_samples
+        max_workers = getattr(self.llm, 'max_workers', 8)
+        with ThreadPoolExecutor(max_workers=min(self.k_samples, max_workers)) as executor:
+            futures = {executor.submit(generate_revision, p): i for i, p in enumerate(revision_prompts)}
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    revised_responses[idx] = future.result()
+                except Exception as e:
+                    print(f"Revision sample {idx} failed: {e}")
+                    from ..core.llm import LLMResponse
+                    revised_responses[idx] = LLMResponse(content="", prompt_tokens=0, completion_tokens=0)
+
+        revised_answers = [self._parse_answer(r.content, task_type) for r in revised_responses]
 
         return initial_answers, revised_answers, None
 
@@ -252,40 +268,46 @@ class SelfRevisionMI:
             )
             return response.content
 
-        # Get diverse initial samples
+        # Get diverse initial samples (diversity sampler handles its own sampling)
         initial_raw, initial_weights = self.diversity_sampler.sample_diverse(
             sample_func=sample_initial,
             n=self.k_samples,
         )
 
         initial_answers = [self._parse_answer(y, task_type) for y in initial_raw]
-        revised_answers = []
-        revised_weights = []
 
-        # For each initial answer, sample revised answer (also with diversity)
-        for i, y0 in enumerate(initial_raw):
+        # Build revision prompts
+        revision_prompts = []
+        for y0 in initial_raw:
             revision_prompt = revision_prompt_template.format(initial_answer=y0)
             full_revision_prompt = initial_prompt + "\n\n" + revision_prompt
+            revision_prompts.append(full_revision_prompt)
 
-            def sample_revised():
-                response = self.llm.generate(
-                    messages=[{"role": "user", "content": full_revision_prompt}],
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    max_tokens=256,
-                )
-                return response.content
+        # Generate revised answers in parallel
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            # Single sample for revision (paired with initial)
-            y1_response = self.llm.generate(
-                messages=[{"role": "user", "content": full_revision_prompt}],
+        def generate_revision(prompt):
+            return self.llm.generate(
+                messages=[{"role": "user", "content": prompt}],
                 temperature=self.temperature,
                 top_p=self.top_p,
                 max_tokens=256,
             )
-            y1 = y1_response.content
-            y1_parsed = self._parse_answer(y1, task_type)
-            revised_answers.append(y1_parsed)
+
+        revised_responses = [None] * len(initial_raw)
+        max_workers = getattr(self.llm, 'max_workers', 8)
+        with ThreadPoolExecutor(max_workers=min(len(initial_raw), max_workers)) as executor:
+            futures = {executor.submit(generate_revision, p): i for i, p in enumerate(revision_prompts)}
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    revised_responses[idx] = future.result()
+                except Exception as e:
+                    print(f"Revision sample {idx} failed: {e}")
+                    from ..core.llm import LLMResponse
+                    revised_responses[idx] = LLMResponse(content="", prompt_tokens=0, completion_tokens=0)
+
+        revised_answers = [self._parse_answer(r.content, task_type) for r in revised_responses]
 
         # Combine weights (use initial weights for the pairs)
         return initial_answers, revised_answers, initial_weights

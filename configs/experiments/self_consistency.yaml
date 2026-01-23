@@ -1,0 +1,17 @@
+# Self-Consistency: Stop when majority answer cluster frequency >= threshold
+experiment_name: self_consistency
+task: dc
+data_subset: test
+
+calibrate: false
+n_puzzles: 20
+
+methods:
+  - self_consistency
+
+# Turn settings
+max_turns: 25
+
+# Self-consistency parameters
+k_samples: 8              # Number of answer samples to generate
+consistency_threshold: 0.7  # Stop when majority cluster >= this fraction

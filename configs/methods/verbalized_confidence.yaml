@@ -1,0 +1,4 @@
+# Verbalized Confidence Method Defaults
+# Stop when model's self-reported confidence >= threshold
+
+confidence_threshold: 8.0  # Stop when model reports confidence >= 8/10

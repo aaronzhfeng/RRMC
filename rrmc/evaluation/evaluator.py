@@ -8,11 +8,14 @@ import json
 import os
 import time
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any, Type
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 import numpy as np
 from scipy import stats as scipy_stats
+from tqdm import tqdm
 
 from ..core.llm import LLMWrapper
 from ..core.environment import ARBenchEnv, TaskType, ActionASK, ActionANSWER
@@ -83,6 +86,7 @@ class RRMCEvaluator:
         max_turns: int = 25,
         output_dir: str = "./results",
         regime: str = "normal",
+        max_workers: int = 5,
     ):
         """
         Initialize evaluator.
@@ -94,6 +98,7 @@ class RRMCEvaluator:
             max_turns: Maximum turns per episode
             output_dir: Directory for saving results
             regime: Decoding regime ("normal" or "homogeneous")
+            max_workers: Max concurrent puzzle evaluations (default: 5)
         """
         self.llm = llm
         self.data_path = data_path
@@ -101,8 +106,9 @@ class RRMCEvaluator:
         self.max_turns = max_turns
         self.output_dir = output_dir
         self.regime = regime
+        self.max_workers = max_workers
 
-        # Initialize environment
+        # Initialize environment (for sequential runs and metadata)
         self.env = ARBenchEnv(
             task_type=task_type,
             data_path=data_path,
@@ -286,6 +292,7 @@ Make your next guess (4 unique digits):"""
         stopping_rule: BaseStoppingRule,
         puzzle_indices: Optional[List[int]] = None,
         verbose: bool = True,
+        parallel: bool = True,
     ) -> EvaluationResult:
         """
         Evaluate a stopping rule on multiple puzzles.
@@ -294,6 +301,7 @@ Make your next guess (4 unique digits):"""
             stopping_rule: Stopping rule to evaluate
             puzzle_indices: Which puzzles to run (default: all)
             verbose: Whether to print progress
+            parallel: Whether to run puzzles in parallel (default: True)
 
         Returns:
             EvaluationResult with aggregated metrics
@@ -305,21 +313,306 @@ Make your next guess (4 unique digits):"""
         if verbose:
             print(f"\nEvaluating {method_name} on {len(puzzle_indices)} puzzles...")
 
+        if not parallel or len(puzzle_indices) <= 1 or self.max_workers <= 1:
+            # Sequential execution
+            return self._evaluate_method_sequential(stopping_rule, puzzle_indices, verbose)
+        else:
+            # Parallel execution
+            return self._evaluate_method_parallel(stopping_rule, puzzle_indices, verbose)
+
+    def _evaluate_method_sequential(
+        self,
+        stopping_rule: BaseStoppingRule,
+        puzzle_indices: List[int],
+        verbose: bool,
+    ) -> EvaluationResult:
+        """Sequential puzzle evaluation (original behavior)."""
+        method_name = type(stopping_rule).__name__
         results = []
         correct_count = 0
         total_turns = 0
 
-        for i, idx in enumerate(puzzle_indices):
-            if verbose and i % 5 == 0:
-                print(f"  Progress: {i}/{len(puzzle_indices)}")
-
+        puzzle_iter = tqdm(
+            puzzle_indices,
+            desc=f"  {method_name[:20]}",
+            leave=False,
+            disable=not verbose,
+        )
+        for idx in puzzle_iter:
             result = self.run_episode(idx, stopping_rule)
             results.append(result)
 
             if result.correct:
                 correct_count += 1
             total_turns += result.turns_used
+            
+            # Update progress bar postfix with running stats
+            acc = correct_count / len(results)
+            puzzle_iter.set_postfix(acc=f"{acc:.0%}", turns=f"{total_turns/len(results):.1f}")
 
+        return self._build_evaluation_result(results, puzzle_indices, verbose)
+
+    def _evaluate_method_parallel(
+        self,
+        stopping_rule: BaseStoppingRule,
+        puzzle_indices: List[int],
+        verbose: bool,
+    ) -> EvaluationResult:
+        """Parallel puzzle evaluation using ThreadPoolExecutor."""
+        method_name = type(stopping_rule).__name__
+        
+        # Thread-safe counters
+        results_lock = threading.Lock()
+        results_dict = {}
+        correct_count = [0]
+        total_turns = [0]
+        completed = [0]
+        
+        # Progress bar for puzzles
+        pbar = tqdm(
+            total=len(puzzle_indices),
+            desc=f"  {method_name[:20]}",
+            leave=False,
+            disable=not verbose,
+        )
+
+        def run_single_puzzle(idx: int) -> EpisodeResult:
+            """Run a single puzzle with its own environment (thread-safe)."""
+            # Create fresh environment for this thread
+            thread_env = ARBenchEnv(
+                task_type=self.task_type,
+                data_path=self.data_path,
+                llm=self.llm,
+            )
+            
+            # Run episode with the thread-local environment
+            result = self._run_episode_with_env(idx, stopping_rule, thread_env)
+            
+            # Update counters (thread-safe)
+            with results_lock:
+                results_dict[idx] = result
+                completed[0] += 1
+                if result.correct:
+                    correct_count[0] += 1
+                total_turns[0] += result.turns_used
+                
+                # Update progress bar
+                pbar.update(1)
+                acc = correct_count[0] / completed[0] if completed[0] > 0 else 0
+                avg_t = total_turns[0] / completed[0] if completed[0] > 0 else 0
+                pbar.set_postfix(acc=f"{acc:.0%}", turns=f"{avg_t:.1f}")
+            
+            return result
+
+        # Run puzzles in parallel
+        try:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {executor.submit(run_single_puzzle, idx): idx for idx in puzzle_indices}
+                
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        future.result()  # Raises exception if any
+                    except Exception as e:
+                        print(f"\nError in puzzle {idx}: {e}")
+                        with results_lock:
+                            results_dict[idx] = EpisodeResult(
+                                puzzle_idx=idx,
+                                method=method_name,
+                                correct=False,
+                                prediction="",
+                                ground_truth="",
+                                turns_used=0,
+                                mi_scores=[],
+                                decisions=[],
+                                total_time=0.0,
+                            )
+        finally:
+            pbar.close()
+
+        # Sort results by puzzle index
+        results = [results_dict[idx] for idx in sorted(results_dict.keys())]
+        return self._build_evaluation_result(results, puzzle_indices, verbose)
+
+    def _run_episode_with_env(
+        self,
+        puzzle_idx: int,
+        stopping_rule: BaseStoppingRule,
+        env: ARBenchEnv,
+    ) -> EpisodeResult:
+        """Run a single episode with a specific environment (thread-safe)."""
+        start_time = time.time()
+
+        # Reset environment
+        obs = env.reset(puzzle_idx)
+
+        # Map task type to correct string
+        if self.task_type == TaskType.DC:
+            task_type_str = "DC"
+        elif self.task_type == TaskType.SP:
+            task_type_str = "SP"
+        elif self.task_type == TaskType.GN:
+            task_type_str = "GN"
+        else:
+            raise ValueError(f"Unknown task type: {self.task_type}")
+
+        mi_scores = []
+        decisions = []
+        turn = 0
+
+        while not env.done and turn < self.max_turns:
+            turn += 1
+
+            # Get current state
+            state = env.get_state()
+
+            # Make stopping decision
+            decision = stopping_rule.should_stop(task_type_str, state, turn)
+            mi_scores.append(decision.score)
+            decisions.append({
+                "turn": turn,
+                "score": decision.score,
+                "should_stop": decision.should_stop,
+                "reason": decision.reason,
+            })
+
+            if decision.should_stop:
+                # Submit answer
+                answer = decision.prediction or stopping_rule.get_best_answer(task_type_str, state)
+                result = env.step(ActionANSWER(answer=answer))
+                break
+            else:
+                # Generate and ask question
+                question, suspect = self._generate_question_with_env(state, env)
+                if self.task_type == TaskType.DC:
+                    result = env.step(ActionASK(question=question, suspect=suspect))
+                else:
+                    result = env.step(ActionASK(question=question))
+
+        # If we exhausted turns without stopping, force answer
+        if not env.done:
+            state = env.get_state()
+            answer = stopping_rule.get_best_answer(task_type_str, state)
+            result = env.step(ActionANSWER(answer=answer))
+
+        total_time = time.time() - start_time
+
+        # Extract result info
+        info = result.info if hasattr(result, 'info') else {}
+
+        return EpisodeResult(
+            puzzle_idx=puzzle_idx,
+            method=type(stopping_rule).__name__,
+            correct=info.get("correct", False),
+            prediction=info.get("prediction", ""),
+            ground_truth=info.get("ground_truth", ""),
+            turns_used=turn,
+            mi_scores=mi_scores,
+            decisions=decisions,
+            total_time=total_time,
+        )
+
+    def _generate_question_with_env(self, state: Dict[str, Any], env: ARBenchEnv) -> tuple:
+        """Generate next question using simple prompting (thread-safe version)."""
+        history = state.get("history_string", "")
+        initial_info = state.get("initial_info", "")
+
+        if self.task_type == TaskType.DC:
+            suspect_names = state.get("suspect_names", [])
+            suspect_list = ", ".join(suspect_names)
+
+            prompt = f"""You are investigating a murder case.
+
+Case background:
+{initial_info}
+
+Previous interrogation:
+{history}
+
+Choose a suspect to question and formulate a question.
+Available suspects: {suspect_list}
+
+Format your response as:
+Suspect: [name]
+Question: [your question]"""
+
+            response = self.llm.generate(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=256,
+            )
+
+            # Parse response
+            text = response.content
+            suspect_match = None
+            for name in suspect_names:
+                if name.lower() in text.lower():
+                    suspect_match = name
+                    break
+            suspect = suspect_match or suspect_names[0] if suspect_names else ""
+
+            question_match = text.split("Question:")[-1].strip() if "Question:" in text else text
+            question = question_match.split("\n")[0].strip()
+
+            return question, suspect
+
+        elif self.task_type == TaskType.SP:
+            prompt = f"""You are playing a situation puzzle game.
+
+Situation: {state.get('surface', '')}
+
+Previous questions and answers:
+{history}
+
+Ask a yes/no question to uncover the hidden story:"""
+
+            response = self.llm.generate(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=128,
+            )
+            return response.content.strip(), None
+
+        else:  # GN
+            prompt = f"""You are playing a number guessing game.
+The secret is a 4-digit number with unique digits.
+
+Previous guesses:
+{history}
+
+Make your next guess (4 unique digits):"""
+
+            response = self.llm.generate(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=32,
+            )
+            digits = re.sub(r'[^0-9]', '', response.content)[:4]
+            return digits, None
+
+    def _build_evaluation_result(
+        self,
+        results: List[EpisodeResult],
+        puzzle_indices: List[int],
+        verbose: bool,
+    ) -> EvaluationResult:
+        """Build EvaluationResult from episode results."""
+        if not results:
+            return EvaluationResult(
+                method="Unknown",
+                task_type=self.task_type.value,
+                n_episodes=0,
+                accuracy=0.0,
+                avg_turns=0.0,
+                std_turns=0.0,
+                avg_mi=0.0,
+                episode_results=[],
+            )
+
+        method_name = results[0].method
+        correct_count = sum(1 for r in results if r.correct)
+        total_turns = sum(r.turns_used for r in results)
+        
         accuracy = correct_count / len(puzzle_indices) if puzzle_indices else 0.0
         avg_turns = total_turns / len(puzzle_indices) if puzzle_indices else 0.0
         std_turns = np.std([r.turns_used for r in results]) if results else 0.0
@@ -513,9 +806,13 @@ Make your next guess (4 unique digits):"""
 
         states_collected = 0
 
-        for i, puzzle_idx in enumerate(puzzle_indices):
-            if verbose and i % 5 == 0:
-                print(f"  Calibration progress: {i}/{len(puzzle_indices)} puzzles, {states_collected} states")
+        puzzle_iter = tqdm(
+            puzzle_indices,
+            desc="  Calibrating",
+            leave=False,
+            disable=not verbose,
+        )
+        for puzzle_idx in puzzle_iter:
 
             # Reset environment
             obs = self.env.reset(puzzle_idx)
@@ -564,6 +861,7 @@ Make your next guess (4 unique digits):"""
                     task_type=task_type_str,
                 )
                 states_collected += 1
+                puzzle_iter.set_postfix(states=states_collected)
 
                 # Ask a question to continue the episode
                 question, suspect = self._generate_question(state)
@@ -573,7 +871,7 @@ Make your next guess (4 unique digits):"""
                     result = self.env.step(ActionASK(question=question))
 
         if verbose:
-            print(f"  Collected {states_collected} calibration states from {len(puzzle_indices)} puzzles")
+            print(f"\n  Collected {states_collected} calibration states from {len(puzzle_indices)} puzzles")
 
         return calibrator
 

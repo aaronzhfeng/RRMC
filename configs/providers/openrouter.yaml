@@ -1,3 +1,9 @@
 # OpenRouter API Configuration
 base_url: https://openrouter.ai/api/v1
-api_key: ${OPENROUTER_API_KEY}
+api_key: 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
+
+# Provider routing - Fireworks has 133 tps vs AtlasCloud's 15 tps
+provider:
+  order:
+    - Fireworks
+  allow_fallbacks: true
