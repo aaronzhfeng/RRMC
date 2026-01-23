@@ -20,7 +20,8 @@ from ..core.clustering import SemanticClusterer
 from ..core.mi_estimator import RobustMI
 from ..core.calibration import RiskControlledCalibrator, CalibrationResult
 from ..core.mi_estimator import compute_homogeneity_score
-from ..baselines.stopping_rules import (
+from ..methods import get_method
+from ..methods.stopping_rules import (
     BaseStoppingRule,
     FixedTurnsStopping,
     SelfConsistencyStopping,

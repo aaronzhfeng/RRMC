@@ -325,7 +325,7 @@ def main():
                         print(f"  Using fallback threshold: {calibrated_threshold}")
 
                 # Import here to avoid circular imports
-                from rrmc.baselines.stopping_rules import RobustMIStopping
+                from rrmc.methods.stopping_rules import RobustMIStopping
 
                 if verbose:
                     print(f"\n{'='*60}")
