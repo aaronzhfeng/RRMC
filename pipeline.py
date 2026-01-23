@@ -1,0 +1,373 @@
+"""
+RRMC Pipeline.
+
+Orchestrates calibration, evaluation, and comparison of stopping methods.
+"""
+
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from config import Config, get_method_config
+from rrmc.core.llm import LLMWrapper, load_api_key_from_env_file
+from rrmc.core.environment import TaskType
+from rrmc.core.clustering import SemanticClusterer
+from rrmc.evaluation.evaluator import RRMCEvaluator, print_comparison_table
+from rrmc.methods import get_method
+
+
+class Pipeline:
+    """
+    RRMC experiment pipeline.
+
+    Handles the full workflow:
+    1. Load configuration
+    2. Initialize LLM and evaluator
+    3. Run calibration (if enabled)
+    4. Evaluate methods
+    5. Generate comparison report
+    """
+
+    def __init__(self, config: Config):
+        """
+        Initialize pipeline with configuration.
+
+        Args:
+            config: Config object with experiment settings
+        """
+        self.config = config
+        self.llm = None
+        self.evaluator = None
+        self.train_evaluator = None
+        self.results = {}
+
+    def run(self) -> Dict[str, Any]:
+        """
+        Run the full pipeline.
+
+        Returns:
+            Results dictionary with calibration and evaluation results
+        """
+        self._init_llm()
+        self._init_evaluator()
+
+        if self.config.get("calibrate", False):
+            return self._run_calibration_pipeline()
+        else:
+            return self._run_comparison_pipeline()
+
+    def _init_llm(self):
+        """Initialize LLM wrapper."""
+        verbose = self.config.get("verbose", True)
+
+        # Get API key
+        api_key = self.config.get("api_key", "")
+        if not api_key or api_key.startswith("${"):
+            # Try environment variable
+            api_key = os.environ.get("OPENROUTER_API_KEY", "")
+
+        if not api_key:
+            # Try env file
+            env_file = self.config.get("env_file", "openrouter.env")
+            if os.path.exists(env_file):
+                api_key = load_api_key_from_env_file(env_file)
+
+        if not api_key:
+            raise ValueError("No API key found. Set OPENROUTER_API_KEY or provide in config.")
+
+        model = self.config.get("policy_model", "qwen/qwen3-8b")
+        if verbose:
+            print(f"Initializing LLM: {model}")
+
+        self.llm = LLMWrapper(
+            api_key=api_key,
+            model=model,
+            default_temperature=self.config.get("temperature", 0.7),
+            default_top_p=self.config.get("top_p", 0.95),
+        )
+
+    def _init_evaluator(self):
+        """Initialize evaluator(s)."""
+        verbose = self.config.get("verbose", True)
+
+        # Map task string to TaskType
+        task_str = self.config.get("task", "dc")
+        task_type = {
+            "dc": TaskType.DC,
+            "sp": TaskType.SP,
+            "gn": TaskType.GN,
+        }[task_str]
+
+        # Determine data paths
+        base_dir = Path(__file__).parent
+        data_subset = self.config.get("data_subset", "test")
+
+        test_path = self.config.get("test_data") or str(
+            base_dir / "AR-Bench" / "data" / task_str / f"{data_subset}.json"
+        )
+
+        if not os.path.exists(test_path):
+            raise FileNotFoundError(f"Test data not found: {test_path}")
+
+        if verbose:
+            print(f"Task: {task_type.value}")
+            print(f"Data: {test_path}")
+
+        self.evaluator = RRMCEvaluator(
+            llm=self.llm,
+            data_path=test_path,
+            task_type=task_type,
+            max_turns=self.config.get("max_turns", 25),
+            output_dir=self.config.get("output_dir", "results"),
+            regime=self.config.get("regime", "normal"),
+        )
+
+        # Initialize train evaluator if calibrating
+        if self.config.get("calibrate", False):
+            train_path = self.config.get("train_data") or str(
+                base_dir / "AR-Bench" / "data" / task_str / "train.json"
+            )
+
+            if not os.path.exists(train_path):
+                # Fall back to test data
+                train_path = test_path
+
+            if train_path != test_path:
+                self.train_evaluator = RRMCEvaluator(
+                    llm=self.llm,
+                    data_path=train_path,
+                    task_type=task_type,
+                    max_turns=self.config.get("max_turns", 25),
+                    output_dir=self.config.get("output_dir", "results"),
+                    regime=self.config.get("regime", "normal"),
+                )
+            else:
+                self.train_evaluator = self.evaluator
+
+    def _run_calibration_pipeline(self) -> Dict[str, Any]:
+        """Run calibration + evaluation pipeline."""
+        verbose = self.config.get("verbose", True)
+
+        # Get puzzle indices
+        n_train = self.config.get("n_train", 20)
+        n_test = self.config.get("n_test", 10)
+
+        n_train_available = len(self.train_evaluator.env)
+        n_test_available = len(self.evaluator.env)
+
+        # Handle same train/test file
+        if self.train_evaluator is self.evaluator:
+            max_idx = n_train_available
+            train_indices = list(range(0, min(n_train, max_idx // 2)))
+            test_indices = list(range(max_idx // 2, max_idx // 2 + min(n_test, max_idx // 2)))
+        else:
+            train_indices = list(range(min(n_train, n_train_available)))
+            test_indices = list(range(min(n_test, n_test_available)))
+
+        if verbose:
+            print(f"Train puzzles: {len(train_indices)}")
+            print(f"Test puzzles: {len(test_indices)}")
+            print(f"Target error rate: {self.config.get('target_error', 0.10):.1%}")
+            print(f"Regime: {self.config.get('regime', 'normal')}")
+
+        # Get variants
+        variants = self.config.get("variants", ["base", "skeptical"])
+        if isinstance(variants, str):
+            variants = [v.strip() for v in variants.split(",")]
+
+        # Phase 1: Collect calibration states
+        calibrator = self.train_evaluator.collect_calibration_states(
+            puzzle_indices=train_indices,
+            k_samples=self.config.get("k_samples", 4),
+            variants=variants,
+            verbose=verbose,
+        )
+
+        # Phase 2: Calibrate threshold
+        calibration_result = self.train_evaluator.calibrate_threshold(
+            calibrator=calibrator,
+            target_error=self.config.get("target_error", 0.10),
+            verbose=verbose,
+        )
+
+        # Save calibration
+        output_dir = self.config.get("output_dir", "results")
+        os.makedirs(output_dir, exist_ok=True)
+
+        task_str = self.config.get("task", "dc")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        calibration_path = os.path.join(output_dir, f"calibration_{task_str}_{timestamp}.json")
+        calibrator.save(calibration_path)
+
+        if verbose:
+            print(f"Calibration saved to: {calibration_path}")
+
+        # Get calibrated threshold
+        calibrated_threshold = calibration_result.threshold
+        if calibrated_threshold == -float('inf'):
+            calibrated_threshold = 0.1
+            if verbose:
+                print(f"Using fallback threshold: {calibrated_threshold}")
+
+        # Phase 3: Evaluate methods
+        if verbose:
+            print(f"\n{'='*60}")
+            print("EVALUATION PHASE")
+            print(f"{'='*60}")
+            print(f"Using calibrated threshold τ = {calibrated_threshold:.4f}")
+
+        eval_results = {}
+
+        # Calibrated RRMC
+        calibrated_rule = get_method(
+            "robust_mi",
+            llm=self.llm,
+            clusterer=self.evaluator.clusterer,
+            threshold=calibrated_threshold,
+            k_samples=self.config.get("k_samples", 4),
+            max_turns=self.config.get("max_turns", 25),
+            variants=variants,
+            regime=self.config.get("regime", "normal"),
+        )
+        eval_results["rrmc_calibrated"] = self.evaluator.evaluate_method(
+            stopping_rule=calibrated_rule,
+            puzzle_indices=test_indices,
+            verbose=verbose,
+        )
+
+        # Compare against other methods
+        methods = self.config.get("methods", ["fixed_turns", "self_consistency", "mi_only"])
+        for method_name in methods:
+            if method_name == "robust_mi":
+                continue  # Already evaluated as rrmc_calibrated
+
+            method_cfg = get_method_config(method_name)
+            stopping_rule = self._create_method(method_name, method_cfg)
+            eval_results[method_name] = self.evaluator.evaluate_method(
+                stopping_rule=stopping_rule,
+                puzzle_indices=test_indices,
+                verbose=verbose,
+            )
+
+        # Save results
+        self.evaluator._save_results(eval_results)
+
+        # Get MI-error correlation
+        mi_corr = getattr(calibrator, 'mi_error_correlation', None)
+
+        results = {
+            "calibration": {
+                "threshold": calibration_result.threshold,
+                "n_states": calibration_result.n_states,
+                "n_covered": calibration_result.n_covered,
+                "empirical_error": calibration_result.empirical_error,
+                "ucb_error": calibration_result.ucb_error,
+                "mi_error_correlation": mi_corr,
+            },
+            "evaluation": eval_results,
+        }
+
+        # Print comparison table
+        print_comparison_table(eval_results, mi_error_correlation=mi_corr)
+
+        if verbose:
+            self._print_calibration_summary(results["calibration"])
+
+        self._print_token_usage()
+        return results
+
+    def _run_comparison_pipeline(self) -> Dict[str, Any]:
+        """Run simple comparison pipeline (no calibration)."""
+        verbose = self.config.get("verbose", True)
+
+        n_puzzles = self.config.get("n_puzzles", 5)
+        n_available = len(self.evaluator.env)
+        puzzle_indices = list(range(min(n_puzzles, n_available)))
+
+        methods = self.config.get("methods", ["fixed_turns", "self_consistency", "mi_only", "robust_mi"])
+        if isinstance(methods, str):
+            methods = [m.strip() for m in methods.split(",")]
+
+        if verbose:
+            print(f"Evaluating {len(puzzle_indices)} puzzles")
+            print(f"Methods: {methods}")
+            print("\n" + "=" * 60)
+            print("STARTING EVALUATION")
+            print("=" * 60)
+
+        results = {}
+        for method_name in methods:
+            method_cfg = get_method_config(method_name)
+            stopping_rule = self._create_method(method_name, method_cfg)
+            results[method_name] = self.evaluator.evaluate_method(
+                stopping_rule=stopping_rule,
+                puzzle_indices=puzzle_indices,
+                verbose=verbose,
+            )
+
+        # Save and print
+        self.evaluator._save_results(results)
+        print_comparison_table(results)
+        self._print_token_usage()
+
+        return {"evaluation": results}
+
+    def _create_method(self, method_name: str, method_cfg: Dict[str, Any]):
+        """Create a stopping method with merged config."""
+        # Base kwargs
+        kwargs = {
+            "llm": self.llm,
+            "max_turns": self.config.get("max_turns", 25),
+        }
+
+        # Add clusterer for methods that need it
+        if method_name in ["self_consistency", "semantic_entropy", "mi_only", "robust_mi"]:
+            kwargs["clusterer"] = self.evaluator.clusterer
+
+        # Method-specific defaults
+        if method_name == "fixed_turns":
+            kwargs["fixed_turns"] = method_cfg.get("fixed_turns", 10)
+        elif method_name == "self_consistency":
+            kwargs["k_samples"] = method_cfg.get("k_samples", 8)
+            kwargs["consistency_threshold"] = method_cfg.get("consistency_threshold", 0.7)
+        elif method_name == "semantic_entropy":
+            kwargs["k_samples"] = method_cfg.get("k_samples", 8)
+            kwargs["entropy_threshold"] = method_cfg.get("entropy_threshold", 0.5)
+        elif method_name == "mi_only":
+            kwargs["k_samples"] = method_cfg.get("k_samples", 6)
+            kwargs["mi_threshold"] = method_cfg.get("mi_threshold", 0.3)
+        elif method_name == "robust_mi":
+            kwargs["k_samples"] = self.config.get("k_samples", method_cfg.get("k_samples", 4))
+            kwargs["threshold"] = method_cfg.get("threshold", 0.3)
+            kwargs["use_diversity_sampling"] = self.config.get(
+                "use_diversity_sampling",
+                method_cfg.get("use_diversity_sampling", True)
+            )
+            kwargs["regime"] = self.config.get("regime", method_cfg.get("regime", "normal"))
+            variants = self.config.get("variants", method_cfg.get("variants", ["base", "skeptical"]))
+            if isinstance(variants, str):
+                variants = [v.strip() for v in variants.split(",")]
+            kwargs["variants"] = variants
+
+        return get_method(method_name, **kwargs)
+
+    def _print_calibration_summary(self, calibration: Dict[str, Any]):
+        """Print calibration summary."""
+        print(f"\nCalibration Summary:")
+        print(f"  Threshold (τ): {calibration['threshold']:.4f}")
+        print(f"  States collected: {calibration['n_states']}")
+        print(f"  States covered: {calibration['n_covered']}")
+        print(f"  Empirical error: {calibration['empirical_error']:.2%}")
+        if calibration.get("mi_error_correlation"):
+            corr = calibration["mi_error_correlation"]
+            print(f"  MI-Error ρ: {corr['rho']:.4f} (p={corr['pvalue']:.4f})")
+
+    def _print_token_usage(self):
+        """Print API token usage."""
+        if self.llm:
+            usage = self.llm.get_token_usage()
+            print(f"\nTotal API usage:")
+            print(f"  Prompt tokens: {usage['prompt_tokens']:,}")
+            print(f"  Completion tokens: {usage['completion_tokens']:,}")
+            print(f"  Total tokens: {usage['total_tokens']:,}")
