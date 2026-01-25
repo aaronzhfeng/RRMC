@@ -84,6 +84,9 @@ class Pipeline:
         """
         max_turns = self.config.get("max_turns", 25)
         k_samples = self.config.get("k_samples", 4)
+        task_str = self.config.get("task", "dc")
+        # DC/SP use an NPC LLM call per question; GN is symbolic
+        npc_calls = 1 if task_str in ("dc", "sp") else 0
         
         if self.config.get("calibrate", False):
             n_train = self.config.get("n_train", 20)
@@ -94,11 +97,11 @@ class Pipeline:
             # Calibration: n_train puzzles, each turn has question + MI sampling
             # MI sampling: k_samples × n_variants
             n_variants = len(self.config.get("variants", ["base", "skeptical"]))
-            calib_calls = n_train * max_turns * (1 + k_samples * n_variants)
+            calib_calls = n_train * max_turns * (1 + npc_calls + k_samples * n_variants)
             
             # Evaluation: n_test puzzles × n_methods × (calls per method)
             # Rough estimate: each method averages ~(1 + k_samples) calls per turn
-            eval_calls = n_test * n_methods * max_turns * (1 + k_samples)
+            eval_calls = n_test * n_methods * max_turns * (1 + npc_calls + k_samples)
             
             return calib_calls + eval_calls
         else:
@@ -109,7 +112,7 @@ class Pipeline:
             # Each method: n_puzzles × max_turns × (1 + avg_samples)
             # fixed_turns: 1 call/turn, others: 1 + k_samples calls/turn
             avg_samples = k_samples if n_methods > 1 else 0
-            return n_puzzles * n_methods * max_turns * (1 + avg_samples)
+            return n_puzzles * n_methods * max_turns * (1 + npc_calls + avg_samples)
 
     def _init_llm(self):
         """Initialize LLM wrapper."""
@@ -131,6 +134,7 @@ class Pipeline:
             raise ValueError("No API key found. Set OPENROUTER_API_KEY or provide in config.")
 
         model = self.config.get("policy_model", "qwen/qwen3-8b")
+        base_url = self.config.get("base_url", None)
         max_workers = self.config.get("max_workers", 8)
         provider = self.config.get("provider", None)
         
@@ -141,6 +145,7 @@ class Pipeline:
         self.llm = LLMWrapper(
             api_key=api_key,
             model=model,
+            base_url=base_url,
             default_temperature=self.config.get("temperature", 0.7),
             default_top_p=self.config.get("top_p", 0.95),
             max_workers=max_workers,
