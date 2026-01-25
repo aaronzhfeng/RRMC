@@ -28,10 +28,282 @@ from ..methods.stopping_rules import (
     BaseStoppingRule,
     FixedTurnsStopping,
     SelfConsistencyStopping,
+    VerbalizedConfidenceStopping,
     SemanticEntropyStopping,
     MIOnlyStopping,
     RobustMIStopping,
 )
+
+
+# =============================================================================
+# AR-Bench Prompts (ported from AR-Bench/arbench/reasoner/dc/prompt.py)
+# =============================================================================
+
+DC_PROPOSE_TEMPLATE = """You will take on the role of a detective tasked with finding the real murderer in this case. Your goal is to solve the mystery by questioning the suspects. You will take turns asking these questions and using the answers to gather evidence and piece together the truth. The game will conduct in {turn} turns, in each turn you can only propose one question
+The case background is:
+{background}
+"""
+
+DC_SELECT_SUSPECT_TEMPLATE = "Turn {turn}: Now choose a suspect to interrogate. {suspect_names}. Output ONLY the suspect's full name, nothing else. No explanations, no reasoning, just the name."
+
+DC_REFINE_SELECT_SUSPECT = "Invalid response. Output ONLY the suspect's full name. No other text."
+
+DC_QUESTION_PROPOSE_PROMPT = """Turn {turn}: Now give your question to the suspect. Output ONLY your question, nothing else. No reasoning, no explanation, just the question.
+Example format: "Where were you at 8pm last night?"
+Your question:"""
+
+DC_SELECT_MURDERER_TEMPLATE = """Now, based on your obtained information, you should tell me who is more likely to be the true murderer, {choice}
+You should only output the index of the candidate suspect like: A , B, C, D or E.
+you should strictly follow this answer format:
+Reason: [Your inference step by step]
+Answer: [A, B, C, D or E]
+"""
+
+# SP Prompts (from AR-Bench/arbench/reasoner/sp/prompt.py)
+SP_PROPOSE_TEMPLATE = """The scenario is: {scenario}
+
+Your task is to find out what truly happened by asking yes-or-no questions. You will take turns asking questions.
+
+The game will conduct in {turn} turns. In each turn, output ONLY your question - no reasoning or explanation.
+"""
+
+SP_QUESTION_PROMPT = """Turn {turn}: Ask a yes/no question. Output ONLY the question itself, nothing else.
+Your question:"""
+
+# GN Prompts (from AR-Bench/arbench/reasoner/gn/prompt.py)
+GN_PROPOSE_TEMPLATE = """Let's play a game of guessing a 4-digit number.
+
+Rules:
+- The secret is a 4-digit number where each digit is unique (0-9, no repeating)
+- After each guess, you'll get: Bulls (correct digit AND position) and Cows (correct digit, wrong position)
+
+The game will conduct in {turn} turns. Output ONLY your 4-digit guess each turn, nothing else.
+"""
+
+GN_GUESS_PROMPT = """Turn {turn}: Make your guess. Output ONLY 4 unique digits, nothing else.
+Your guess:"""
+
+
+class DCConversationManager:
+    """
+    Manages the multi-turn conversation structure for DC task.
+    
+    Uses AR-Bench's prompt structure with separate suspect selection
+    and question generation steps.
+    """
+    
+    def __init__(self, llm: LLMWrapper, max_turns: int = 25):
+        self.llm = llm
+        self.max_turns = max_turns
+        self.conversation: List[Dict[str, str]] = []
+        self.initialized = False
+        
+    def initialize(self, background: str, suspect_names: List[str]) -> None:
+        """Initialize the conversation with system prompt."""
+        self.suspect_names = suspect_names
+        self.suspect_names_str = ", ".join(suspect_names)
+        
+        # System message with case background
+        system_content = DC_PROPOSE_TEMPLATE.format(
+            turn=self.max_turns,
+            background=background
+        )
+        
+        self.conversation = [{
+            "role": "system",
+            "content": system_content
+        }]
+        self.initialized = True
+        
+    def generate_question(self, turn: int) -> tuple:
+        """
+        Generate a question using AR-Bench's two-step process:
+        1. Select suspect
+        2. Generate question
+        
+        Returns:
+            (question, suspect) tuple
+        """
+        if not self.initialized:
+            raise ValueError("Conversation not initialized. Call initialize() first.")
+        
+        # Step 1: Select suspect
+        select_prompt = DC_SELECT_SUSPECT_TEMPLATE.format(
+            turn=turn,
+            suspect_names=self.suspect_names_str
+        )
+        
+        self.conversation.append({"role": "user", "content": select_prompt})
+        
+        response = self.llm.generate(
+            messages=self.conversation.copy(),
+            temperature=0.7,
+            max_tokens=64,
+        )
+        
+        suspect = self._parse_suspect(response.content)
+        self.conversation.append({"role": "assistant", "content": suspect})
+        
+        # Retry if suspect parsing failed
+        if suspect not in self.suspect_names:
+            # Add refine prompt
+            self.conversation.append({"role": "user", "content": DC_REFINE_SELECT_SUSPECT})
+            response = self.llm.generate(
+                messages=self.conversation.copy(),
+                temperature=0.7,
+                max_tokens=64,
+            )
+            suspect = self._parse_suspect(response.content)
+            self.conversation.append({"role": "assistant", "content": suspect})
+        
+        # Step 2: Generate question
+        question_prompt = DC_QUESTION_PROPOSE_PROMPT.format(turn=turn)
+        self.conversation.append({"role": "user", "content": question_prompt})
+        
+        response = self.llm.generate(
+            messages=self.conversation.copy(),
+            temperature=0.7,
+            max_tokens=256,
+        )
+        
+        question = response.content.strip()
+        self.conversation.append({"role": "assistant", "content": question})
+        
+        return question, suspect
+    
+    def add_feedback(self, feedback: str) -> None:
+        """Add NPC feedback to conversation."""
+        self.conversation.append({"role": "user", "content": feedback})
+    
+    def _parse_suspect(self, text: str) -> str:
+        """Parse suspect name from model response."""
+        text = text.strip()
+        
+        # Try exact match first
+        for name in self.suspect_names:
+            if name.lower() == text.lower():
+                return name
+        
+        # Try partial match
+        for name in self.suspect_names:
+            if name.lower() in text.lower():
+                return name
+        
+        # Fallback to first suspect
+        return self.suspect_names[0] if self.suspect_names else ""
+    
+    def get_final_answer_prompt(self, choices: Dict[str, str]) -> List[Dict[str, str]]:
+        """Get conversation with final answer prompt."""
+        choice_str = ", ".join([f"{k}. {v}" for k, v in choices.items()])
+        
+        final_prompt = DC_SELECT_MURDERER_TEMPLATE.format(choice=choice_str)
+        
+        messages = self.conversation.copy()
+        messages.append({"role": "user", "content": final_prompt})
+        
+        return messages
+
+
+class SPConversationManager:
+    """Manages multi-turn conversation for Situation Puzzles."""
+    
+    def __init__(self, llm: LLMWrapper, max_turns: int = 25):
+        self.llm = llm
+        self.max_turns = max_turns
+        self.conversation: List[Dict[str, str]] = []
+        self.initialized = False
+        
+    def initialize(self, scenario: str) -> None:
+        """Initialize with the puzzle scenario."""
+        system_content = SP_PROPOSE_TEMPLATE.format(
+            scenario=scenario,
+            turn=self.max_turns
+        )
+        
+        self.conversation = [{
+            "role": "system",
+            "content": system_content
+        }]
+        self.initialized = True
+        
+    def generate_question(self, turn: int) -> str:
+        """Generate a yes/no question."""
+        if not self.initialized:
+            raise ValueError("Conversation not initialized")
+            
+        question_prompt = SP_QUESTION_PROMPT.format(turn=turn)
+        self.conversation.append({"role": "user", "content": question_prompt})
+        
+        response = self.llm.generate(
+            messages=self.conversation.copy(),
+            temperature=0.7,
+            max_tokens=128,
+        )
+        
+        question = response.content.strip()
+        self.conversation.append({"role": "assistant", "content": question})
+        
+        return question
+    
+    def add_feedback(self, feedback: str) -> None:
+        """Add NPC feedback."""
+        self.conversation.append({"role": "user", "content": feedback})
+
+
+class GNConversationManager:
+    """Manages multi-turn conversation for Guessing Numbers."""
+    
+    def __init__(self, llm: LLMWrapper, max_turns: int = 25):
+        self.llm = llm
+        self.max_turns = max_turns
+        self.conversation: List[Dict[str, str]] = []
+        self.initialized = False
+        
+    def initialize(self) -> None:
+        """Initialize the game."""
+        system_content = GN_PROPOSE_TEMPLATE.format(turn=self.max_turns)
+        
+        self.conversation = [{
+            "role": "system",
+            "content": system_content
+        }]
+        self.initialized = True
+        
+    def generate_guess(self, turn: int) -> str:
+        """Generate a 4-digit guess."""
+        if not self.initialized:
+            raise ValueError("Conversation not initialized")
+            
+        guess_prompt = GN_GUESS_PROMPT.format(turn=turn)
+        self.conversation.append({"role": "user", "content": guess_prompt})
+        
+        response = self.llm.generate(
+            messages=self.conversation.copy(),
+            temperature=0.7,
+            max_tokens=32,
+        )
+        
+        # Parse digits from response
+        guess = re.sub(r'[^0-9]', '', response.content)[:4]
+        
+        # Ensure 4 unique digits
+        if len(guess) < 4 or len(set(guess)) != 4:
+            # Generate a valid fallback
+            used = set(guess)
+            while len(guess) < 4:
+                for d in "0123456789":
+                    if d not in used:
+                        guess += d
+                        used.add(d)
+                        break
+            guess = guess[:4]
+        
+        self.conversation.append({"role": "assistant", "content": guess})
+        return guess
+    
+    def add_feedback(self, feedback: str) -> None:
+        """Add game feedback."""
+        self.conversation.append({"role": "user", "content": feedback})
 
 
 @dataclass
@@ -46,6 +318,9 @@ class EpisodeResult:
     mi_scores: List[float] = field(default_factory=list)
     decisions: List[Dict] = field(default_factory=list)
     total_time: float = 0.0
+    raw_answer: Optional[str] = None
+    raw_samples: List[str] = field(default_factory=list)
+    history: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -120,6 +395,67 @@ class RRMCEvaluator:
 
         os.makedirs(output_dir, exist_ok=True)
 
+    def _clone_stopping_rule(self, stopping_rule: BaseStoppingRule) -> BaseStoppingRule:
+        """Create a thread-local stopping rule instance."""
+        if hasattr(stopping_rule, "clone") and callable(getattr(stopping_rule, "clone")):
+            return stopping_rule.clone()
+
+        if isinstance(stopping_rule, FixedTurnsStopping):
+            return FixedTurnsStopping(
+                llm=stopping_rule.llm,
+                fixed_turns=stopping_rule.fixed_turns,
+                max_turns=stopping_rule.max_turns,
+            )
+        if isinstance(stopping_rule, SelfConsistencyStopping):
+            return SelfConsistencyStopping(
+                llm=stopping_rule.llm,
+                clusterer=stopping_rule.clusterer,
+                k_samples=stopping_rule.k_samples,
+                consistency_threshold=stopping_rule.consistency_threshold,
+                max_turns=stopping_rule.max_turns,
+                temperature=stopping_rule.temperature,
+            )
+        if isinstance(stopping_rule, SemanticEntropyStopping):
+            return SemanticEntropyStopping(
+                llm=stopping_rule.llm,
+                clusterer=stopping_rule.clusterer,
+                k_samples=stopping_rule.k_samples,
+                entropy_threshold=stopping_rule.entropy_threshold,
+                max_turns=stopping_rule.max_turns,
+                temperature=stopping_rule.temperature,
+            )
+        if isinstance(stopping_rule, VerbalizedConfidenceStopping):
+            return VerbalizedConfidenceStopping(
+                llm=stopping_rule.llm,
+                confidence_threshold=stopping_rule.confidence_threshold,
+                max_turns=stopping_rule.max_turns,
+            )
+        if isinstance(stopping_rule, MIOnlyStopping):
+            mi_estimator = stopping_rule.mi_estimator
+            return MIOnlyStopping(
+                llm=mi_estimator.llm,
+                clusterer=mi_estimator.clusterer,
+                mi_threshold=stopping_rule.mi_threshold,
+                k_samples=mi_estimator.k_samples,
+                max_turns=stopping_rule.max_turns,
+                temperature=mi_estimator.temperature,
+            )
+        if isinstance(stopping_rule, RobustMIStopping):
+            mi_estimator = stopping_rule.robust_mi.mi_estimator
+            return RobustMIStopping(
+                llm=mi_estimator.llm,
+                clusterer=mi_estimator.clusterer,
+                threshold=stopping_rule.threshold,
+                k_samples=mi_estimator.k_samples,
+                max_turns=stopping_rule.max_turns,
+                temperature=mi_estimator.temperature,
+                variants=stopping_rule.variants,
+                use_diversity_sampling=stopping_rule.robust_mi.use_diversity_sampling,
+                regime=stopping_rule.regime,
+            )
+
+        return stopping_rule
+
     def run_episode(
         self,
         puzzle_idx: int,
@@ -132,7 +468,7 @@ class RRMCEvaluator:
         Args:
             puzzle_idx: Index of puzzle to run
             stopping_rule: Stopping rule to use
-            question_generator: Question generator (uses simple prompting if None)
+            question_generator: Question generator (uses AR-Bench prompts if None)
 
         Returns:
             EpisodeResult
@@ -152,9 +488,27 @@ class RRMCEvaluator:
         else:
             raise ValueError(f"Unknown task type: {self.task_type}")
 
+        # Create conversation manager for this episode
+        conv_manager = None
+        if question_generator is None:
+            if self.task_type == TaskType.DC:
+                conv_manager = DCConversationManager(self.llm, self.max_turns)
+                conv_manager.initialize(
+                    background=obs.get("initial_info", ""),
+                    suspect_names=obs.get("suspect_names", [])
+                )
+            elif self.task_type == TaskType.SP:
+                conv_manager = SPConversationManager(self.llm, self.max_turns)
+                conv_manager.initialize(scenario=obs.get("surface", ""))
+            elif self.task_type == TaskType.GN:
+                conv_manager = GNConversationManager(self.llm, self.max_turns)
+                conv_manager.initialize()
+
         mi_scores = []
         decisions = []
         turn = 0
+        final_raw_answer = None
+        final_raw_samples: List[str] = []
 
         while not self.env.done and turn < self.max_turns:
             turn += 1
@@ -175,20 +529,47 @@ class RRMCEvaluator:
             if decision.should_stop:
                 # Submit answer
                 answer = decision.prediction or stopping_rule.get_best_answer(task_type_str, state)
+                final_raw_answer = getattr(stopping_rule, "_last_raw_answer", None)
+                final_raw_samples = getattr(stopping_rule, "_last_raw_samples", [])
                 result = self.env.step(ActionANSWER(answer=answer))
                 break
             else:
                 # Generate and ask question
-                question, suspect = self._generate_question(state)
+                if question_generator:
+                    generated = question_generator(state)
+                    if isinstance(generated, tuple):
+                        question = generated[0] if len(generated) > 0 else ""
+                        suspect = generated[1] if len(generated) > 1 else None
+                    else:
+                        question, suspect = generated, None
+                    if not question:
+                        question, suspect = self._generate_question(state, conv_manager, turn)
+                else:
+                    # Use conversation manager for proper multi-turn conversation
+                    if self.task_type == TaskType.DC:
+                        question, suspect = conv_manager.generate_question(turn)
+                    elif self.task_type == TaskType.SP:
+                        question = conv_manager.generate_question(turn)
+                        suspect = None
+                    else:  # GN
+                        question = conv_manager.generate_guess(turn)
+                        suspect = None
+                
                 if self.task_type == TaskType.DC:
                     result = self.env.step(ActionASK(question=question, suspect=suspect))
                 else:
                     result = self.env.step(ActionASK(question=question))
+                
+                # Add NPC feedback to conversation manager
+                if conv_manager is not None:
+                    conv_manager.add_feedback(result.observation)
 
         # If we exhausted turns without stopping, force answer
         if not self.env.done:
             state = self.env.get_state()
             answer = stopping_rule.get_best_answer(task_type_str, state)
+            final_raw_answer = getattr(stopping_rule, "_last_raw_answer", None)
+            final_raw_samples = getattr(stopping_rule, "_last_raw_samples", [])
             result = self.env.step(ActionANSWER(answer=answer))
 
         total_time = time.time() - start_time
@@ -206,86 +587,61 @@ class RRMCEvaluator:
             mi_scores=mi_scores,
             decisions=decisions,
             total_time=total_time,
+            raw_answer=final_raw_answer,
+            raw_samples=final_raw_samples,
+            history=self.env.get_history(),
         )
 
-    def _generate_question(self, state: Dict[str, Any]) -> tuple:
-        """Generate next question using simple prompting."""
-        history = state.get("history_string", "")
-        initial_info = state.get("initial_info", "")
-
+    def _generate_question(self, state: Dict[str, Any], conv_manager=None, turn: int = 1) -> tuple:
+        """
+        Generate next question using AR-Bench's multi-turn conversation structure.
+        
+        Args:
+            state: Current environment state
+            conv_manager: Conversation manager (created if None)
+            turn: Current turn number
+            
+        Returns:
+            (question, suspect) tuple
+        """
         if self.task_type == TaskType.DC:
-            suspect_names = state.get("suspect_names", [])
-            suspect_list = ", ".join(suspect_names)
-
-            prompt = f"""You are investigating a murder case.
-
-Case background:
-{initial_info}
-
-Previous interrogation:
-{history}
-
-Choose a suspect to question and formulate a question.
-Available suspects: {suspect_list}
-
-Format your response as:
-Suspect: [name]
-Question: [your question]"""
-
-            response = self.llm.generate(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=256,
-            )
-
-            # Parse response
-            text = response.content
-            suspect_match = None
-            for name in suspect_names:
-                if name.lower() in text.lower():
-                    suspect_match = name
-                    break
-            suspect = suspect_match or suspect_names[0] if suspect_names else ""
-
-            question_match = text.split("Question:")[-1].strip() if "Question:" in text else text
-            question = question_match.split("\n")[0].strip()
-
+            # Use conversation manager for proper multi-turn structure
+            if conv_manager is None:
+                conv_manager = DCConversationManager(self.llm, self.max_turns)
+                conv_manager.initialize(
+                    background=state.get("initial_info", ""),
+                    suspect_names=state.get("suspect_names", [])
+                )
+                # Replay history into conversation
+                for h in state.get("history", []):
+                    # Each history item was a turn - add the feedback
+                    conv_manager.add_feedback(h.get("feedback", ""))
+            
+            question, suspect = conv_manager.generate_question(turn)
             return question, suspect
 
         elif self.task_type == TaskType.SP:
-            prompt = f"""You are playing a situation puzzle game.
-
-Situation: {state.get('surface', '')}
-
-Previous questions and answers:
-{history}
-
-Ask a yes/no question to uncover the hidden story:"""
-
-            response = self.llm.generate(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=128,
-            )
-            return response.content.strip(), None
+            if conv_manager is None:
+                conv_manager = SPConversationManager(self.llm, self.max_turns)
+                conv_manager.initialize(scenario=state.get("surface", ""))
+                # Replay history
+                for h in state.get("history", []):
+                    conv_manager.add_feedback(h.get("feedback", ""))
+            
+            question = conv_manager.generate_question(turn)
+            return question, None
 
         else:  # GN
-            prompt = f"""You are playing a number guessing game.
-The secret is a 4-digit number with unique digits.
-
-Previous guesses:
-{history}
-
-Make your next guess (4 unique digits):"""
-
-            response = self.llm.generate(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=32,
-            )
-            import re
-            digits = re.sub(r'[^0-9]', '', response.content)[:4]
-            return digits, None
+            if conv_manager is None:
+                conv_manager = GNConversationManager(self.llm, self.max_turns)
+                conv_manager.initialize()
+                # Replay history
+                for h in state.get("history", []):
+                    feedback = f"{h.get('bulls', 0)} Bulls, {h.get('cows', 0)} Cows"
+                    conv_manager.add_feedback(feedback)
+            
+            guess = conv_manager.generate_guess(turn)
+            return guess, None
 
     def evaluate_method(
         self,
@@ -384,9 +740,12 @@ Make your next guess (4 unique digits):"""
                 data_path=self.data_path,
                 llm=self.llm,
             )
-            
+
+            # Clone stopping rule to avoid shared mutable state across threads
+            local_rule = self._clone_stopping_rule(stopping_rule)
+
             # Run episode with the thread-local environment
-            result = self._run_episode_with_env(idx, stopping_rule, thread_env)
+            result = self._run_episode_with_env(idx, local_rule, thread_env)
             
             # Update counters (thread-safe)
             with results_lock:
@@ -456,9 +815,26 @@ Make your next guess (4 unique digits):"""
         else:
             raise ValueError(f"Unknown task type: {self.task_type}")
 
+        # Create conversation manager for this episode (maintains multi-turn context)
+        conv_manager = None
+        if self.task_type == TaskType.DC:
+            conv_manager = DCConversationManager(self.llm, self.max_turns)
+            conv_manager.initialize(
+                background=obs.get("initial_info", ""),
+                suspect_names=obs.get("suspect_names", [])
+            )
+        elif self.task_type == TaskType.SP:
+            conv_manager = SPConversationManager(self.llm, self.max_turns)
+            conv_manager.initialize(scenario=obs.get("surface", ""))
+        elif self.task_type == TaskType.GN:
+            conv_manager = GNConversationManager(self.llm, self.max_turns)
+            conv_manager.initialize()
+
         mi_scores = []
         decisions = []
         turn = 0
+        final_raw_answer = None
+        final_raw_samples: List[str] = []
 
         while not env.done and turn < self.max_turns:
             turn += 1
@@ -479,20 +855,32 @@ Make your next guess (4 unique digits):"""
             if decision.should_stop:
                 # Submit answer
                 answer = decision.prediction or stopping_rule.get_best_answer(task_type_str, state)
+                final_raw_answer = getattr(stopping_rule, "_last_raw_answer", None)
+                final_raw_samples = getattr(stopping_rule, "_last_raw_samples", [])
                 result = env.step(ActionANSWER(answer=answer))
                 break
             else:
-                # Generate and ask question
-                question, suspect = self._generate_question_with_env(state, env)
+                # Generate and ask question using conversation manager
                 if self.task_type == TaskType.DC:
+                    question, suspect = conv_manager.generate_question(turn)
                     result = env.step(ActionASK(question=question, suspect=suspect))
-                else:
+                    # Add NPC feedback to conversation for next turn
+                    conv_manager.add_feedback(result.observation)
+                elif self.task_type == TaskType.SP:
+                    question = conv_manager.generate_question(turn)
                     result = env.step(ActionASK(question=question))
+                    conv_manager.add_feedback(result.observation)
+                else:  # GN
+                    guess = conv_manager.generate_guess(turn)
+                    result = env.step(ActionASK(question=guess))
+                    conv_manager.add_feedback(result.observation)
 
         # If we exhausted turns without stopping, force answer
         if not env.done:
             state = env.get_state()
             answer = stopping_rule.get_best_answer(task_type_str, state)
+            final_raw_answer = getattr(stopping_rule, "_last_raw_answer", None)
+            final_raw_samples = getattr(stopping_rule, "_last_raw_samples", [])
             result = env.step(ActionANSWER(answer=answer))
 
         total_time = time.time() - start_time
@@ -510,85 +898,27 @@ Make your next guess (4 unique digits):"""
             mi_scores=mi_scores,
             decisions=decisions,
             total_time=total_time,
+            raw_answer=final_raw_answer,
+            raw_samples=final_raw_samples,
+            history=env.get_history(),
         )
 
-    def _generate_question_with_env(self, state: Dict[str, Any], env: ARBenchEnv) -> tuple:
-        """Generate next question using simple prompting (thread-safe version)."""
-        history = state.get("history_string", "")
-        initial_info = state.get("initial_info", "")
-
-        if self.task_type == TaskType.DC:
-            suspect_names = state.get("suspect_names", [])
-            suspect_list = ", ".join(suspect_names)
-
-            prompt = f"""You are investigating a murder case.
-
-Case background:
-{initial_info}
-
-Previous interrogation:
-{history}
-
-Choose a suspect to question and formulate a question.
-Available suspects: {suspect_list}
-
-Format your response as:
-Suspect: [name]
-Question: [your question]"""
-
-            response = self.llm.generate(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=256,
-            )
-
-            # Parse response
-            text = response.content
-            suspect_match = None
-            for name in suspect_names:
-                if name.lower() in text.lower():
-                    suspect_match = name
-                    break
-            suspect = suspect_match or suspect_names[0] if suspect_names else ""
-
-            question_match = text.split("Question:")[-1].strip() if "Question:" in text else text
-            question = question_match.split("\n")[0].strip()
-
-            return question, suspect
-
-        elif self.task_type == TaskType.SP:
-            prompt = f"""You are playing a situation puzzle game.
-
-Situation: {state.get('surface', '')}
-
-Previous questions and answers:
-{history}
-
-Ask a yes/no question to uncover the hidden story:"""
-
-            response = self.llm.generate(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=128,
-            )
-            return response.content.strip(), None
-
-        else:  # GN
-            prompt = f"""You are playing a number guessing game.
-The secret is a 4-digit number with unique digits.
-
-Previous guesses:
-{history}
-
-Make your next guess (4 unique digits):"""
-
-            response = self.llm.generate(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=32,
-            )
-            digits = re.sub(r'[^0-9]', '', response.content)[:4]
-            return digits, None
+    def _generate_question_with_env(self, state: Dict[str, Any], env: ARBenchEnv, conv_manager=None, turn: int = 1) -> tuple:
+        """
+        Generate next question using AR-Bench's multi-turn conversation structure.
+        Thread-safe version that works with parallel evaluation.
+        
+        Args:
+            state: Current environment state
+            env: The environment instance (for thread-safety)
+            conv_manager: Conversation manager (created if None)
+            turn: Current turn number
+            
+        Returns:
+            (question, suspect) tuple
+        """
+        # Delegate to _generate_question which now uses conversation managers
+        return self._generate_question(state, conv_manager, turn)
 
     def _build_evaluation_result(
         self,
@@ -735,6 +1065,8 @@ Make your next guess (4 unique digits):"""
                         "turns_used": ep.turns_used,
                         "mi_scores": ep.mi_scores,
                         "total_time": ep.total_time,
+                        "raw_answer": ep.raw_answer,
+                        "raw_samples": ep.raw_samples,
                     }
                     for ep in result.episode_results
                 ],
@@ -744,6 +1076,41 @@ Make your next guess (4 unique digits):"""
             json.dump(output, f, indent=2)
 
         print(f"\nResults saved to: {filepath}")
+        self._save_arbench_results(results, timestamp)
+
+    def _save_arbench_results(self, results: Dict[str, EvaluationResult], timestamp: str) -> None:
+        """Save per-method logs in AR-Bench-style hierarchy."""
+        task_map = {
+            TaskType.DC: "dc",
+            TaskType.SP: "sp",
+            TaskType.GN: "gn",
+        }
+        task_slug = task_map.get(self.task_type, "dc")
+        model_slug = getattr(self.llm, "model", "model").replace("/", "_").replace(".", "-")
+        base_dir = os.path.join(self.output_dir, "baseline", task_slug)
+
+        for method, result in results.items():
+            method_dir = os.path.join(base_dir, method)
+            os.makedirs(method_dir, exist_ok=True)
+            output_path = os.path.join(method_dir, f"{model_slug}_{timestamp}.json")
+
+            records = []
+            for ep in result.episode_results:
+                records.append({
+                    "idx": ep.puzzle_idx,
+                    "pred": ep.prediction,
+                    "label": ep.ground_truth,
+                    "record": ep.history,
+                    "round": ep.turns_used,
+                    "correctness": ep.correct,
+                    "raw_pred": ep.raw_answer or "",
+                    "raw_samples": ep.raw_samples,
+                    "mi_scores": ep.mi_scores,
+                    "decisions": ep.decisions,
+                })
+
+            with open(output_path, "w") as f:
+                json.dump(records, f, indent=2)
 
     def collect_calibration_states(
         self,
@@ -820,6 +1187,21 @@ Make your next guess (4 unique digits):"""
             if task_type_str == "GN" and ground_truth is not None:
                 ground_truth = re.sub(r"[^0-9]", "", str(ground_truth))[:4]
 
+            # Create conversation manager for this puzzle
+            conv_manager = None
+            if self.task_type == TaskType.DC:
+                conv_manager = DCConversationManager(self.llm, self.max_turns)
+                conv_manager.initialize(
+                    background=obs.get("initial_info", ""),
+                    suspect_names=obs.get("suspect_names", [])
+                )
+            elif self.task_type == TaskType.SP:
+                conv_manager = SPConversationManager(self.llm, self.max_turns)
+                conv_manager.initialize(scenario=obs.get("surface", ""))
+            elif self.task_type == TaskType.GN:
+                conv_manager = GNConversationManager(self.llm, self.max_turns)
+                conv_manager.initialize()
+
             turn = 0
             while not self.env.done and turn < self.max_turns:
                 turn += 1
@@ -863,12 +1245,19 @@ Make your next guess (4 unique digits):"""
                 states_collected += 1
                 puzzle_iter.set_postfix(states=states_collected)
 
-                # Ask a question to continue the episode
-                question, suspect = self._generate_question(state)
+                # Ask a question using conversation manager to continue the episode
                 if self.task_type == TaskType.DC:
+                    question, suspect = conv_manager.generate_question(turn)
                     result = self.env.step(ActionASK(question=question, suspect=suspect))
-                else:
+                    conv_manager.add_feedback(result.observation)
+                elif self.task_type == TaskType.SP:
+                    question = conv_manager.generate_question(turn)
                     result = self.env.step(ActionASK(question=question))
+                    conv_manager.add_feedback(result.observation)
+                else:  # GN
+                    guess = conv_manager.generate_guess(turn)
+                    result = self.env.step(ActionASK(question=guess))
+                    conv_manager.add_feedback(result.observation)
 
         if verbose:
             print(f"\n  Collected {states_collected} calibration states from {len(puzzle_indices)} puzzles")

@@ -82,6 +82,7 @@ class FixedTurnsStopping(BaseStoppingRule):
         super().__init__(max_turns)
         self.llm = llm
         self.fixed_turns = fixed_turns
+        self._last_raw_answer: Optional[str] = None
 
     def should_stop(
         self,
@@ -108,17 +109,23 @@ class FixedTurnsStopping(BaseStoppingRule):
             temperature=0.3,
             max_tokens=256,
         )
+        self._last_raw_answer = response.raw_content or response.content
         return self._parse_answer(response.content, task_type)
 
     def _get_answer_prompt(self, task_type: str, state: Dict[str, Any]) -> str:
         if task_type == "DC":
+            choices = state.get("choices", {})
+            choices_str = ""
+            if isinstance(choices, dict) and choices:
+                formatted = [f"{k}: {v}" for k, v in choices.items()]
+                choices_str = "Choices:\n" + "\n".join(formatted) + "\n\n"
             return f"""Based on the investigation, identify the murderer.
 
 Case: {state.get('initial_info', '')}
 
 Interrogation: {state.get('history_string', '')}
 
-Answer with a single letter (A, B, C, D, or E):"""
+{choices_str}Answer ONLY with a single letter (A, B, C, D, or E):"""
         elif task_type == "SP":
             return f"""Explain the hidden story.
 
@@ -137,7 +144,10 @@ Your guess (4 unique digits):"""
     def _parse_answer(self, response: str, task_type: str) -> str:
         if task_type == "DC":
             match = re.search(r'\b([A-E])\b', response.upper())
-            return match.group(1) if match else "A"
+            if match:
+                return match.group(1)
+            # Preserve raw response so env can match suspect names/digits
+            return response.strip()
         elif task_type == "GN":
             digits = re.sub(r'[^0-9]', '', response)[:4]
             return digits.ljust(4, '0')
@@ -167,6 +177,7 @@ class SelfConsistencyStopping(BaseStoppingRule):
         self.consistency_threshold = consistency_threshold
         self.temperature = temperature
         self._last_answers: List[str] = []
+        self._last_raw_samples: List[str] = []
 
     def should_stop(
         self,
@@ -191,6 +202,7 @@ class SelfConsistencyStopping(BaseStoppingRule):
             max_tokens=256,
             parallel=True,
         )
+        self._last_raw_samples = [r.raw_content or r.content for r in responses]
         answers = [self._parse_answer(r.content, task_type) for r in responses]
 
         self._last_answers = answers

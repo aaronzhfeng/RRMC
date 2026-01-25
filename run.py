@@ -59,6 +59,7 @@ def main(
     quiet: bool = False,
     # Utility flags
     list: bool = False,
+    return_results: bool = False,
 ):
     """
     Run RRMC experiment.
@@ -78,6 +79,7 @@ def main(
         verbose: Print verbose output
         quiet: Suppress output
         list: List available experiments and exit
+        return_results: Return results dict (suppresses Fire stdout spam by default)
     """
     # Handle list flag
     if list:
@@ -139,7 +141,9 @@ def main(
     try:
         pipeline = Pipeline(cfg)
         results = pipeline.run()
-        return results
+        if return_results:
+            return results
+        return None
     except KeyboardInterrupt:
         print("\n\nExperiment interrupted by user.")
         sys.exit(0)
@@ -172,6 +176,12 @@ if __name__ == "__main__":
         parser.add_argument("--verbose", action="store_true", default=True, help="Verbose")
         parser.add_argument("--quiet", action="store_true", help="Quiet mode")
         parser.add_argument("--list", action="store_true", help="List experiments")
+        parser.add_argument(
+            "--return-results",
+            action="store_true",
+            dest="return_results",
+            help="Return results dict (prints with Fire)",
+        )
 
         args = parser.parse_args()
         main(
@@ -188,4 +198,5 @@ if __name__ == "__main__":
             verbose=args.verbose,
             quiet=args.quiet,
             list=args.list,
+            return_results=args.return_results,
         )

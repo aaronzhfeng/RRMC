@@ -73,6 +73,7 @@ def strip_think_tags(text: str) -> str:
 class LLMResponse:
     """Structured response from LLM."""
     content: str
+    raw_content: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
 
@@ -179,12 +180,20 @@ class LLMWrapper:
 
         try:
             response = self.client.chat.completions.create(**kwargs)
-            content = response.choices[0].message.content or ""
+            message = response.choices[0].message
+            content = message.content or ""
+            # Some providers return reasoning separately (content may be empty)
+            if not content:
+                reasoning = getattr(message, "reasoning", None)
+                if reasoning:
+                    content = reasoning
             prompt_tokens = response.usage.prompt_tokens if response.usage else 0
             completion_tokens = response.usage.completion_tokens if response.usage else 0
 
             # Strip Qwen3's <think> tags to get clean output
-            content = strip_think_tags(content)
+            raw_content = content
+            cleaned = strip_think_tags(content)
+            content = cleaned if cleaned else raw_content.strip()
 
             # Thread-safe token tracking
             with self._lock:
@@ -198,6 +207,7 @@ class LLMWrapper:
 
             return LLMResponse(
                 content=content,
+                raw_content=raw_content,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
@@ -207,7 +217,7 @@ class LLMWrapper:
                 self.call_count += 1
             if self.progress_callback:
                 self.progress_callback(1)
-            return LLMResponse(content="", prompt_tokens=0, completion_tokens=0)
+            return LLMResponse(content="", raw_content="", prompt_tokens=0, completion_tokens=0)
 
     def sample_n(
         self,

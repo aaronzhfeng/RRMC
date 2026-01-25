@@ -296,16 +296,33 @@ The investigation focuses on five suspects, one of whom is the true murderer:
         if letter_match:
             return ord(letter_match.group(1)) - ord('A')
 
-        # Check for digit 0-4
-        digit_match = re.search(r'\b([0-4])\b', answer)
-        if digit_match:
-            return int(digit_match.group(1))
+        # Check for digit 1-5 (suspect numbering is often 1-based)
+        one_based_match = re.search(r'\b([1-5])\b', answer)
+        if one_based_match:
+            return int(one_based_match.group(1)) - 1
+
+        # Check for digit 0-4 (0-based indices)
+        zero_based_match = re.search(r'\b([0-4])\b', answer)
+        if zero_based_match:
+            return int(zero_based_match.group(1))
 
         # Check for name match
         answer_lower = answer.lower()
         for i, name in enumerate(suspect_names):
             if name.lower() in answer_lower or answer_lower in name.lower():
                 return i
+
+        # Check for ordinal/number words (e.g., "first suspect", "suspect two")
+        word_map = {
+            "first": 0, "1st": 0, "one": 0,
+            "second": 1, "2nd": 1, "two": 1,
+            "third": 2, "3rd": 2, "three": 2,
+            "fourth": 3, "4th": 3, "four": 3,
+            "fifth": 4, "5th": 4, "five": 4,
+        }
+        for word, idx in word_map.items():
+            if re.search(rf'\b{re.escape(word)}\b', answer_lower):
+                return idx
 
         # Default: try to extract any number
         return 0
@@ -515,6 +532,8 @@ Only answer with the single word."""
                     "bulls": bulls,
                     "cows": cows,
                     "correct": True,
+                    "prediction": guess,
+                    "ground_truth": secret,
                     "turns_used": self.turn,
                 }
             )
