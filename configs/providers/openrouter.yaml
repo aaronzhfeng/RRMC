@@ -1,6 +1,6 @@
 # OpenRouter API Configuration
 base_url: https://openrouter.ai/api/v1
-api_key: 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
+api_key: ${OPENROUTER_API_KEY}
 
 # NOTE: Removed explicit Fireworks provider routing.
 # Fireworks returns Qwen3's reasoning in the content field (without <think> tags),

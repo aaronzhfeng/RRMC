@@ -7,7 +7,7 @@ max_turns: 25
 data_subset: test
 
 # Model settings
-policy_model: qwen/qwen3-8b
+policy_model: qwen/qwen-2.5-7b-instruct
 api_key: ${OPENROUTER_API_KEY}
 base_url: https://openrouter.ai/api/v1
 
@@ -16,7 +16,7 @@ temperature: 0.7
 top_p: 0.95
 
 # Concurrency
-max_workers: 8
+max_workers: 1
 
 # MI estimation defaults
 k_samples: 4
