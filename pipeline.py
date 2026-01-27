@@ -350,6 +350,7 @@ class Pipeline:
         """Run simple comparison pipeline (no calibration)."""
         verbose = self.config.get("verbose", True)
 
+        # Get number of puzzles (supports both n_puzzles and n_test)
         n_puzzles = self.config.get("n_puzzles", 5)
         n_available = len(self.evaluator.env)
         puzzle_indices = list(range(min(n_puzzles, n_available)))

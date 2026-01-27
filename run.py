@@ -47,6 +47,7 @@ def main(
     calibrate: Optional[bool] = None,
     n_train: Optional[int] = None,
     n_test: Optional[int] = None,
+    n_puzzles: Optional[int] = None,  # Alias for n_test
     target_error: Optional[float] = None,
     # MI settings
     k_samples: Optional[int] = None,
@@ -81,6 +82,10 @@ def main(
         list: List available experiments and exit
         return_results: Return results dict (suppresses Fire stdout spam by default)
     """
+    # Handle n_puzzles as alias for n_test
+    if n_puzzles is not None and n_test is None:
+        n_test = n_puzzles
+    
     # Handle list flag
     if list:
         experiments = list_experiments()
@@ -108,6 +113,7 @@ def main(
         overrides["n_train"] = n_train
     if n_test is not None:
         overrides["n_test"] = n_test
+        overrides["n_puzzles"] = n_test  # Also set n_puzzles for comparison pipeline
     if target_error is not None:
         overrides["target_error"] = target_error
     if k_samples is not None:

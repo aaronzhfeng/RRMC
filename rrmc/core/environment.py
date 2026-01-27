@@ -66,6 +66,7 @@ Your Story: {story}
         llm: Optional[LLMWrapper] = None,
         response_temperature: float = 0.7,
         response_top_p: float = 0.7,
+        max_turns: int = 25,
     ):
         """
         Initialize AR-Bench environment.
@@ -76,6 +77,7 @@ Your Story: {story}
             llm: LLM wrapper for NPC responses (required for DC/SP)
             response_temperature: Temperature for NPC responses
             response_top_p: Top-p for NPC responses
+            max_turns: Maximum number of turns per episode
         """
         self.task_type = task_type
         self.llm = llm
@@ -91,7 +93,7 @@ Your Story: {story}
         self.current_puzzle: Optional[Dict] = None
         self.history: List[Dict[str, str]] = []
         self.turn: int = 0
-        self.max_turns: int = 25
+        self.max_turns: int = max_turns
         self.done: bool = False
 
         # DC-specific: response agents for suspects
@@ -211,7 +213,7 @@ The investigation focuses on five suspects, one of whom is the true murderer:
             secret = puzzle.get("secret", puzzle.get("answer", str(puzzle)))
         return {
             "task_type": "GN",
-            "rules": "Guess a 4-digit number with unique digits. You'll receive bulls (correct digit and position) and cows (correct digit, wrong position).",
+            "rules": "Guess a 4-digit number with unique digits (0-9, each digit can only appear once). Feedback: digits in correct position and digits in wrong position.",
             "ground_truth": secret,
         }
 
@@ -525,8 +527,10 @@ Only answer with the single word."""
         # Check if solved
         if bulls == 4:
             self.done = True
+            # Use AR-Bench's feedback format
+            observation = f"{bulls} digits are present in the answer and in the correct positions \n0 digits are present in the answer but in the different positions \n"
             return StepResult(
-                observation=f"4 Bulls, 0 Cows - Correct!",
+                observation=observation,
                 done=True,
                 info={
                     "bulls": bulls,
@@ -545,8 +549,10 @@ Only answer with the single word."""
             "cows": cows,
         })
 
+        # Use AR-Bench's feedback format (eval_prompt)
+        observation = f"{bulls} digits are present in the answer and in the correct positions \n{cows} digits are present in the answer but in the different positions \n"
         return StepResult(
-            observation=f"{bulls} Bulls, {cows} Cows",
+            observation=observation,
             done=False,
             info={"bulls": bulls, "cows": cows, "guess": guess}
         )
@@ -572,8 +578,11 @@ Only answer with the single word."""
             return "\n".join(lines)
         elif self.task_type == TaskType.GN:
             lines = []
-            for h in self.history:
-                lines.append(f"Guess {h['guess']}: {h['bulls']}B {h['cows']}C")
+            for i, h in enumerate(self.history):
+                lines.append(
+                    f"Turn {i+1}: Guess: {h['guess']}, Feedback: {h['bulls']} digits are present in the answer and in the correct positions, "
+                    f"{h['cows']} digits are present in the answer but in the different positions"
+                )
             return "\n".join(lines)
         return ""
 

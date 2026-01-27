@@ -135,11 +135,16 @@ Clues: {state.get('history_string', '')}
 
 Explanation:"""
         else:  # GN
-            return f"""Guess the 4-digit number.
+            # Use AR-Bench's format - game context + final_guess_prompt
+            history = state.get('history_string', '')
+            return f"""Let's play a game of guessing number.
+The game rule is: I have a 4-digit secret number in mind, all digits of the number is unique such that all digits from 0 to 9 can only be present once.
 
-Previous guesses: {state.get('history_string', '')}
+Previous guesses and feedback:
+{history}
 
-Your guess (4 unique digits):"""
+You have finished all the rounds of interaction, please give your final answer based on the guesses and feedback above:
+Guess: [number]"""
 
     def _parse_answer(self, response: str, task_type: str) -> str:
         if task_type == "DC":
@@ -149,8 +154,41 @@ Your guess (4 unique digits):"""
             # Preserve raw response so env can match suspect names/digits
             return response.strip()
         elif task_type == "GN":
-            digits = re.sub(r'[^0-9]', '', response)[:4]
-            return digits.ljust(4, '0')
+            # Look for explicit "Guess: XXXX" or "Final Answer: XXXX" pattern first
+            explicit_patterns = [
+                r'(?:final\s+)?(?:answer|guess)\s*[:\s]+(\d{4})',
+                r'(?:my\s+)?(?:final\s+)?guess\s+(?:is|:)\s*(\d{4})',
+            ]
+            for pattern in explicit_patterns:
+                matches = re.findall(pattern, response.lower())
+                if matches:
+                    # Take the last explicit match
+                    candidate = matches[-1]
+                    if len(set(candidate)) == 4:
+                        return candidate
+            
+            # Extract all 4-digit numbers and return the LAST one with unique digits
+            # (model analyzes previous guesses first, then states final answer)
+            all_digits = re.findall(r'\d{4}', response)
+            valid_candidates = [c for c in all_digits if len(set(c)) == 4]
+            if valid_candidates:
+                return valid_candidates[-1]  # Return LAST valid one
+            
+            # Fallback: extract any 4 digits and try to make unique
+            digits = re.sub(r'[^0-9]', '', response)
+            if len(digits) >= 4:
+                # Try to find 4 unique digits from extracted
+                unique = []
+                for d in digits:
+                    if d not in unique:
+                        unique.append(d)
+                    if len(unique) == 4:
+                        return ''.join(unique)
+            # Last resort: random valid guess
+            import random
+            available = [str(i) for i in range(10)]
+            random.shuffle(available)
+            return ''.join(available[:4])
         return response.strip()[:500]
 
 

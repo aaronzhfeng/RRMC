@@ -70,18 +70,47 @@ The game will conduct in {turn} turns. In each turn, output ONLY your question -
 SP_QUESTION_PROMPT = """Turn {turn}: Ask a yes/no question. Output ONLY the question itself, nothing else.
 Your question:"""
 
-# GN Prompts (from AR-Bench/arbench/reasoner/gn/prompt.py)
-GN_PROPOSE_TEMPLATE = """Let's play a game of guessing a 4-digit number.
+# GN Prompts - Aligned with AR-Bench/arbench/reasoner/gn/prompt.py
+# Using propose_template_with_1_shot for better format compliance
+GN_PROPOSE_TEMPLATE = """Let's play a game of guessing number 
+The game rule is: I have a 4-digit secret number in mind, all digits of the number is unique such that all digits from 0 to 9 can only be present once. For example: 0123 or 9468. You will take turns guessing the number and using feedbacks to progressively reveal the true number. The game will conduct {turn} turns:
+In the game when a guessing number is proposed, I will return the feedback of two information: 
+1. How many digits are present in the answer and in the correct position 
+2. How many digits are present in the answer but in the different position from the guessing number 
+For example: 0 digits are present in the answer and in the correct positions, 2 digits are present in the answer but in the different positions 
 
-Rules:
-- The secret is a 4-digit number where each digit is unique (0-9, no repeating)
-- After each guess, you'll get: Bulls (correct digit AND position) and Cows (correct digit, wrong position)
+Here is an example trajectory:
+Turn 1: Guess: 1234, Feedback: 0 digits are present in the answer and in the correct positions, 0 digits are present in the answer but in the different positions 
+Turn 2: Guess: 5678, Feedback: 0 digits are present in the answer and in the correct positions, 3 digits are present in the answer but in the different positions 
+Turn 3: Guess: 5690, Feedback: 1 digits are present in the answer and in the correct positions, 3 digits are present in the answer but in the different positions
+Turn 4: Guess: 6850, Feedback: 4 digits are present in the answer and in the correct positions, 0 digits are present in the answer but in the different positions
 
-The game will conduct in {turn} turns. Output ONLY your 4-digit guess each turn, nothing else.
+Final Answer: 6850
+
+Game start:
 """
 
-GN_GUESS_PROMPT = """Turn {turn}: Make your guess. Output ONLY 4 unique digits, nothing else.
-Your guess:"""
+# guess_prompt from AR-Bench
+GN_GUESS_PROMPT = """Turn {turn}: Now give me the number you guess in this format, and do not give any other statement:
+Guess: [number]
+"""
+
+# eval_prompt from AR-Bench (for feedback)
+GN_EVAL_PROMPT = """{same_pos} digits are present in the answer and in the correct positions 
+{diff_pos} digits are present in the answer but in the different positions 
+"""
+
+# final_guess_prompt from AR-Bench
+GN_FINAL_GUESS_PROMPT = """
+You have finished all the rounds of interaction, please give your final answer based on the guesses and feedback above:
+Guess: [number]
+"""
+
+# refine_prompt from AR-Bench
+GN_REFINE_PROMPT = """
+Your output does not follow this format: Guess: [number]
+please propose a guess number, for example: Guess: 1234
+"""
 
 
 class DCConversationManager:
@@ -251,7 +280,12 @@ class SPConversationManager:
 
 
 class GNConversationManager:
-    """Manages multi-turn conversation for Guessing Numbers."""
+    """Manages multi-turn conversation for Guessing Numbers.
+    
+    Aligned with AR-Bench's gn_evaluator.py _run_traditional_evaluation.
+    """
+    
+    MAX_RETRIES = 3
     
     def __init__(self, llm: LLMWrapper, max_turns: int = 25):
         self.llm = llm
@@ -268,9 +302,54 @@ class GNConversationManager:
             "content": system_content
         }]
         self.initialized = True
+    
+    def _extract_guess(self, response_text: str) -> Optional[str]:
+        """Extract 4-digit guess from response, handling Qwen3's reasoning output.
+        
+        Looks for:
+        1. "Guess: [number]" format (AR-Bench standard)
+        2. Intent phrases like "I'll guess", "my guess is", "let's try"
+        3. Last 4-digit number with unique digits as fallback
+        """
+        # Remove brackets
+        text = response_text.replace("[", "").replace("]", "").replace("(", "").replace(")", "")
+        text = text.replace("{", "").replace("}", "").replace("*", "")
+        
+        # 1. Look for "Guess: XXXX" pattern (case-insensitive)
+        guess_pattern = r"guess:\s*(\d{4})"
+        match = re.search(guess_pattern, text.lower())
+        if match:
+            candidate = match.group(1)
+            if len(set(candidate)) == 4:
+                return candidate
+        
+        # 2. Look for intent phrases indicating what the model wants to guess
+        intent_patterns = [
+            r"(?:i'?ll guess|my guess is|let'?s try|i'?ll try|going to guess|start with)\s*(\d{4})",
+            r"(\d{4})\s*(?:as my guess|would be|seems)",
+        ]
+        for pattern in intent_patterns:
+            match = re.search(pattern, text.lower())
+            if match:
+                candidate = match.group(1)
+                if len(set(candidate)) == 4:
+                    return candidate
+        
+        # 3. Fallback: find all 4-digit numbers with unique digits, prefer last one
+        four_digit = re.findall(r"\d{4}", text)
+        # Filter to those with unique digits
+        valid_guesses = [n for n in four_digit if len(set(n)) == 4]
+        if valid_guesses:
+            return valid_guesses[-1]  # Take the last valid one
+        
+        # 4. If no valid guess found, take any 4-digit number
+        if four_digit:
+            return four_digit[-1]
+        
+        return None
         
     def generate_guess(self, turn: int) -> str:
-        """Generate a 4-digit guess."""
+        """Generate a 4-digit guess using AR-Bench's format."""
         if not self.initialized:
             raise ValueError("Conversation not initialized")
             
@@ -280,30 +359,79 @@ class GNConversationManager:
         response = self.llm.generate(
             messages=self.conversation.copy(),
             temperature=0.7,
-            max_tokens=32,
+            max_tokens=64,  # Increased for "Guess: XXXX" format
         )
         
-        # Parse digits from response
-        guess = re.sub(r'[^0-9]', '', response.content)[:4]
+        # Store the full response
+        self.conversation.append({"role": "assistant", "content": response.content})
         
-        # Ensure 4 unique digits
-        if len(guess) < 4 or len(set(guess)) != 4:
-            # Generate a valid fallback
-            used = set(guess)
-            while len(guess) < 4:
-                for d in "0123456789":
-                    if d not in used:
-                        guess += d
-                        used.add(d)
-                        break
-            guess = guess[:4]
+        # Extract guess
+        guess = self._extract_guess(response.content)
         
-        self.conversation.append({"role": "assistant", "content": guess})
+        # Retry if extraction failed
+        retries = 0
+        while guess is None and retries < self.MAX_RETRIES:
+            retries += 1
+            # Add refine prompt
+            self.conversation.append({"role": "user", "content": GN_REFINE_PROMPT})
+            
+            response = self.llm.generate(
+                messages=self.conversation.copy(),
+                temperature=0.7,
+                max_tokens=64,
+            )
+            self.conversation.append({"role": "assistant", "content": response.content})
+            guess = self._extract_guess(response.content)
+        
+        # Validate uniqueness
+        if guess and len(set(guess)) != 4:
+            # Invalid guess - generate fallback
+            guess = None
+        
+        # Fallback: generate valid random guess
+        if not guess:
+            import random
+            digits = list("0123456789")
+            random.shuffle(digits)
+            guess = "".join(digits[:4])
+        
         return guess
     
     def add_feedback(self, feedback: str) -> None:
-        """Add game feedback."""
+        """Add game feedback (AR-Bench's eval_prompt format)."""
         self.conversation.append({"role": "user", "content": feedback})
+    
+    def generate_final_answer(self) -> str:
+        """Generate final answer using AR-Bench's final_guess_prompt.
+        
+        This continues the existing conversation, matching AR-Bench's flow.
+        """
+        if not self.initialized:
+            raise ValueError("Conversation not initialized")
+        
+        # Add final guess prompt (AR-Bench's format)
+        self.conversation.append({"role": "user", "content": GN_FINAL_GUESS_PROMPT})
+        
+        response = self.llm.generate(
+            messages=self.conversation.copy(),
+            temperature=0.3,  # Lower temp for final answer
+            max_tokens=64,
+        )
+        
+        self.conversation.append({"role": "assistant", "content": response.content})
+        
+        # Extract guess
+        guess = self._extract_guess(response.content)
+        
+        # Validate and fallback
+        if guess and len(set(guess)) == 4:
+            return guess
+        
+        # Fallback: generate valid random guess
+        import random
+        digits = list("0123456789")
+        random.shuffle(digits)
+        return "".join(digits[:4])
 
 
 @dataclass
@@ -388,6 +516,7 @@ class RRMCEvaluator:
             task_type=task_type,
             data_path=data_path,
             llm=llm,
+            max_turns=max_turns,
         )
 
         # Initialize clusterer (without sentence-transformers dependency for now)
@@ -635,9 +764,11 @@ class RRMCEvaluator:
             if conv_manager is None:
                 conv_manager = GNConversationManager(self.llm, self.max_turns)
                 conv_manager.initialize()
-                # Replay history
+                # Replay history using AR-Bench's eval_prompt format
                 for h in state.get("history", []):
-                    feedback = f"{h.get('bulls', 0)} Bulls, {h.get('cows', 0)} Cows"
+                    same_pos = h.get('bulls', 0)
+                    diff_pos = h.get('cows', 0)
+                    feedback = GN_EVAL_PROMPT.format(same_pos=same_pos, diff_pos=diff_pos)
                     conv_manager.add_feedback(feedback)
             
             guess = conv_manager.generate_guess(turn)
@@ -739,6 +870,7 @@ class RRMCEvaluator:
                 task_type=self.task_type,
                 data_path=self.data_path,
                 llm=self.llm,
+                max_turns=self.max_turns,
             )
 
             # Clone stopping rule to avoid shared mutable state across threads
@@ -1067,6 +1199,7 @@ class RRMCEvaluator:
                         "total_time": ep.total_time,
                         "raw_answer": ep.raw_answer,
                         "raw_samples": ep.raw_samples,
+                        "history": ep.history,  # Include turn-by-turn history
                     }
                     for ep in result.episode_results
                 ],
