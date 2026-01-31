@@ -26,6 +26,13 @@
 | File | Description |
 |------|-------------|
 | **`06_session_progress_20260127.md`** | Session progress (Jan 26-27, 2026) - GN fixes, model testing. |
+| **`07_session_progress_20260130.md`** | Session progress (Jan 30, 2026) - Grid search, validation analysis. |
+
+## Proposed Improvements
+
+| File | Description |
+|------|-------------|
+| **`08_proposed_improvements.md`** | Proposed fixes for Turn-1 stopping problem: (A) prompt-based, (B) code-enforced suspect questioning, (C) partial trajectory, (D) full trajectory ensemble. |
 
 ## Execution Logs
 
