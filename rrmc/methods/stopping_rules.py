@@ -619,3 +619,285 @@ class RobustMIStopping(BaseStoppingRule):
     def update_threshold(self, new_threshold: float):
         """Update the stopping threshold (after calibration)."""
         self.threshold = new_threshold
+
+
+class KnowNoStopping(BaseStoppingRule):
+    """
+    KnowNo-style set-size gate stopping rule.
+
+    Sample k answers, cluster them, and stop when the number of
+    distinct clusters (the "prediction set size") is <= set_size_threshold.
+    Inspired by Ren et al. (2023) "Robots That Ask For Help".
+    """
+
+    def __init__(
+        self,
+        llm: LLMWrapper,
+        clusterer: SemanticClusterer,
+        k_samples: int = 10,
+        set_size_threshold: int = 1,
+        max_turns: int = 25,
+        temperature: float = 0.7,
+    ):
+        super().__init__(max_turns)
+        self.llm = llm
+        self.clusterer = clusterer
+        self.k_samples = k_samples
+        self.set_size_threshold = set_size_threshold
+        self.temperature = temperature
+        self._last_answers: List[str] = []
+
+    def should_stop(
+        self,
+        task_type: str,
+        state: Dict[str, Any],
+        turn: int,
+    ) -> StoppingDecision:
+        if turn >= self.max_turns:
+            return StoppingDecision(
+                should_stop=True,
+                reason="max_turns",
+                score=float('inf'),
+                prediction=self.get_best_answer(task_type, state),
+            )
+
+        prompt = FixedTurnsStopping(self.llm)._get_answer_prompt(task_type, state)
+        responses = self.llm.sample_n(
+            messages=[{"role": "user", "content": prompt}],
+            n=self.k_samples,
+            temperature=self.temperature,
+            max_tokens=256,
+            parallel=True,
+        )
+        answers = [FixedTurnsStopping(self.llm)._parse_answer(r.content, task_type) for r in responses]
+        self._last_answers = answers
+
+        cluster_result = self.clusterer.cluster(answers, task_type)
+        set_size = cluster_result.n_clusters
+
+        should_stop = set_size <= self.set_size_threshold
+
+        return StoppingDecision(
+            should_stop=should_stop,
+            reason="small_set" if should_stop else "large_set",
+            score=float(set_size),
+            prediction=self.get_best_answer(task_type, state) if should_stop else None,
+        )
+
+    def get_best_answer(self, task_type: str, state: Dict[str, Any]) -> str:
+        if self._last_answers:
+            cluster_result = self.clusterer.cluster(self._last_answers, task_type)
+            max_cluster = max(
+                cluster_result.cluster_sizes,
+                key=lambda k: cluster_result.cluster_sizes[k],
+            )
+            return cluster_result.representative_texts[max_cluster]
+        return FixedTurnsStopping(self.llm).get_best_answer(task_type, state)
+
+
+class CIPLiteStopping(BaseStoppingRule):
+    """
+    C-IP-lite: Conformal set-size stopping rule.
+
+    Like KnowNo, but the set-size threshold is calibrated on a held-out
+    set via conformal prediction. During evaluation the calibrated
+    threshold is used directly.
+
+    At runtime:
+    - Sample k answers and cluster.
+    - Compute prediction set size.
+    - Stop if set_size <= calibrated_threshold.
+
+    The threshold can be set via `update_threshold()` after calibration.
+    """
+
+    def __init__(
+        self,
+        llm: LLMWrapper,
+        clusterer: SemanticClusterer,
+        k_samples: int = 10,
+        set_size_threshold: int = 2,
+        max_turns: int = 25,
+        temperature: float = 0.7,
+    ):
+        super().__init__(max_turns)
+        self.llm = llm
+        self.clusterer = clusterer
+        self.k_samples = k_samples
+        self.set_size_threshold = set_size_threshold
+        self.temperature = temperature
+        self._last_answers: List[str] = []
+
+    def should_stop(
+        self,
+        task_type: str,
+        state: Dict[str, Any],
+        turn: int,
+    ) -> StoppingDecision:
+        if turn >= self.max_turns:
+            return StoppingDecision(
+                should_stop=True,
+                reason="max_turns",
+                score=float('inf'),
+                prediction=self.get_best_answer(task_type, state),
+            )
+
+        prompt = FixedTurnsStopping(self.llm)._get_answer_prompt(task_type, state)
+        responses = self.llm.sample_n(
+            messages=[{"role": "user", "content": prompt}],
+            n=self.k_samples,
+            temperature=self.temperature,
+            max_tokens=256,
+            parallel=True,
+        )
+        answers = [FixedTurnsStopping(self.llm)._parse_answer(r.content, task_type) for r in responses]
+        self._last_answers = answers
+
+        cluster_result = self.clusterer.cluster(answers, task_type)
+        set_size = cluster_result.n_clusters
+
+        should_stop = set_size <= self.set_size_threshold
+
+        return StoppingDecision(
+            should_stop=should_stop,
+            reason="conformal_small_set" if should_stop else "conformal_large_set",
+            score=float(set_size),
+            prediction=self.get_best_answer(task_type, state) if should_stop else None,
+        )
+
+    def get_best_answer(self, task_type: str, state: Dict[str, Any]) -> str:
+        if self._last_answers:
+            cluster_result = self.clusterer.cluster(self._last_answers, task_type)
+            max_cluster = max(
+                cluster_result.cluster_sizes,
+                key=lambda k: cluster_result.cluster_sizes[k],
+            )
+            return cluster_result.representative_texts[max_cluster]
+        return FixedTurnsStopping(self.llm).get_best_answer(task_type, state)
+
+    def update_threshold(self, new_threshold: int):
+        """Update calibrated set-size threshold."""
+        self.set_size_threshold = new_threshold
+
+
+class UoTLiteStopping(BaseStoppingRule):
+    """
+    UoT-lite: Uncertainty of Thought stopping rule.
+
+    Simplified version of UoT (Hu et al., 2024):
+    1. Generate a set of plausible answers.
+    2. Stop if only 1 plausible answer remains.
+    3. Otherwise, generate a question designed to split the answer set
+       (the question is logged but not actually used for selection in
+       this stopping-only implementation).
+    """
+
+    UOT_ANSWER_SET_PROMPT = """Given this case/puzzle:
+{context}
+
+Previous questions and answers:
+{history}
+
+Generate a numbered list of plausible answers. Each answer should be a distinct possibility consistent with the evidence so far.
+Format:
+1. [answer 1]
+2. [answer 2]
+...
+
+List only plausible answers:"""
+
+    def __init__(
+        self,
+        llm: LLMWrapper,
+        clusterer: SemanticClusterer,
+        k_samples: int = 6,
+        max_turns: int = 25,
+        temperature: float = 0.7,
+    ):
+        super().__init__(max_turns)
+        self.llm = llm
+        self.clusterer = clusterer
+        self.k_samples = k_samples
+        self.temperature = temperature
+        self._last_answer_set: List[str] = []
+
+    def should_stop(
+        self,
+        task_type: str,
+        state: Dict[str, Any],
+        turn: int,
+    ) -> StoppingDecision:
+        if turn >= self.max_turns:
+            return StoppingDecision(
+                should_stop=True,
+                reason="max_turns",
+                score=float('inf'),
+                prediction=self.get_best_answer(task_type, state),
+            )
+
+        # Generate answer set
+        context = self._get_context(task_type, state)
+        prompt = self.UOT_ANSWER_SET_PROMPT.format(
+            context=context,
+            history=state.get("history_string", ""),
+        )
+
+        response = self.llm.generate(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=self.temperature,
+            max_tokens=512,
+        )
+
+        answer_set = self._parse_answer_set(response.content)
+        self._last_answer_set = answer_set
+
+        # Cluster the answer set to find distinct plausible answers
+        if len(answer_set) >= 2:
+            cluster_result = self.clusterer.cluster(answer_set, task_type)
+            n_plausible = cluster_result.n_clusters
+        else:
+            n_plausible = len(answer_set)
+
+        should_stop = n_plausible <= 1
+
+        return StoppingDecision(
+            should_stop=should_stop,
+            reason="single_answer" if should_stop else "multiple_answers",
+            score=float(n_plausible),
+            prediction=self.get_best_answer(task_type, state) if should_stop else None,
+        )
+
+    def get_best_answer(self, task_type: str, state: Dict[str, Any]) -> str:
+        if self._last_answer_set:
+            # Cluster and return majority
+            cluster_result = self.clusterer.cluster(self._last_answer_set, task_type)
+            if cluster_result.cluster_sizes:
+                max_cluster = max(
+                    cluster_result.cluster_sizes,
+                    key=lambda k: cluster_result.cluster_sizes[k],
+                )
+                return cluster_result.representative_texts[max_cluster]
+            return self._last_answer_set[0]
+        return FixedTurnsStopping(self.llm).get_best_answer(task_type, state)
+
+    def _get_context(self, task_type: str, state: Dict[str, Any]) -> str:
+        if task_type == "DC":
+            return state.get("initial_info", "")
+        elif task_type == "SP":
+            return state.get("surface", "")
+        else:
+            return state.get("rules", "")
+
+    @staticmethod
+    def _parse_answer_set(text: str) -> List[str]:
+        """Parse numbered list of answers."""
+        lines = text.strip().split("\n")
+        answers = []
+        for line in lines:
+            # Match numbered items: "1. answer" or "1) answer"
+            match = re.match(r'^\s*\d+[\.\)]\s*(.+)', line)
+            if match:
+                answer = match.group(1).strip()
+                if answer:
+                    answers.append(answer)
+        return answers if answers else [text.strip()]

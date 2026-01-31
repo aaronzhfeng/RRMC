@@ -7,6 +7,7 @@ Provides a unified interface over AR-Bench tasks (DC, SP, GN).
 import json
 import re
 from typing import Dict, List, Optional, Any, Tuple
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -329,25 +330,42 @@ The investigation focuses on five suspects, one of whom is the true murderer:
         # Default: try to extract any number
         return 0
 
+    @staticmethod
+    def _bag_f1(prediction: str, ground_truth: str, level: str = "char") -> float:
+        """
+        Bag-of-items F1 score matching AR-Bench's scoring semantics.
+
+        Args:
+            prediction: Predicted text
+            ground_truth: Ground truth text
+            level: "char" for character-level, "word" for word-level
+        """
+        if level == "word":
+            pred_items = prediction.lower().split()
+            gt_items = ground_truth.lower().split()
+        else:
+            pred_items = list(prediction.lower())
+            gt_items = list(ground_truth.lower())
+        if not pred_items or not gt_items:
+            return 0.0
+        common = Counter(pred_items) & Counter(gt_items)
+        num_same = sum(common.values())
+        if num_same == 0:
+            return 0.0
+        precision = num_same / len(pred_items)
+        recall = num_same / len(gt_items)
+        return (2 * precision * recall) / (precision + recall)
+
     def _evaluate_sp_answer(self, answer: str) -> StepResult:
-        """Evaluate SP answer using character-level F1."""
+        """Evaluate SP answer using bag-of-characters F1 (AR-Bench compatible)."""
         ground_truth = self.current_puzzle.get("explanation",
                         self.current_puzzle.get("bottom", ""))
 
-        # Simple character-level F1 calculation
-        pred_chars = set(answer.lower())
-        true_chars = set(ground_truth.lower())
-
-        if len(pred_chars) == 0 or len(true_chars) == 0:
-            f1 = 0.0
-        else:
-            intersection = pred_chars & true_chars
-            precision = len(intersection) / len(pred_chars)
-            recall = len(intersection) / len(true_chars)
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        f1_char = self._bag_f1(answer, ground_truth, level="char")
+        f1_word = self._bag_f1(answer, ground_truth, level="word")
 
         # SP uses F1 threshold for correctness (typically F1 > 0.5 is considered correct)
-        correct = f1 > 0.5
+        correct = f1_char > 0.5
 
         return StepResult(
             observation=f"Your explanation submitted.",
@@ -356,7 +374,9 @@ The investigation focuses on five suspects, one of whom is the true murderer:
                 "correct": correct,
                 "prediction": answer,
                 "ground_truth": ground_truth,
-                "f1_score": f1,
+                "f1_score": f1_char,
+                "f1_score_char": f1_char,
+                "f1_score_word": f1_word,
                 "turns_used": self.turn,
             }
         )
@@ -458,38 +478,95 @@ The investigation focuses on five suspects, one of whom is the true murderer:
             }
         )
 
+    # AR-Bench SP referee system prompt (2-shot, from arbench/reasoner/sp/prompt.py)
+    SP_REFEREE_TEMPLATE = """You are the referee of a game where players are shown a <Surface> and you are given the <Bottom>. You need to understand the entire story based on both the <Surface> and <Bottom>. Players will ask questions based on the <Surface>, and you need to judge whether their guesses are correct. Please strictly adhere to answering with only three specified responses: Yes, No, or Unknown, without any explanation.
+
+## Judging Rules
+- If the player's question matches the given <Surface> and <Bottom>: Please only answer "Yes" without any explanation.
+- If the player's question contradicts the given story: Please only answer "No" without any explanation.
+- If the answer to the player's question cannot be found in the <Surface> and <Bottom>, and cannot be deduced through reasoning: Please only answer "Unknown" without any explanation.
+
+## Important Notes
+1. Fully understand the cause, process, and outcome of the entire story, and make logical inferences.
+2. If a conclusion cannot be drawn from the provided story or through reasonable inference, answer "Unknown".
+3. Strictly adhere to answering with only the three specified responses: Yes, No, or Unknown. Do not provide any additional explanations.
+
+## Examples
+
+### Example 1: The Hiccuping Man
+<Surface>
+A man walks into a bar and asks the bartender for a glass of water. The bartender suddenly pulls out a gun and points it at him. The man smiles and says, "Thank you!" then calmly leaves. What happened?
+
+<Bottom>
+The man had hiccups and wanted a glass of water to cure them. The bartender realized this and chose to scare him with a gun. The man's hiccups disappeared due to the sudden shock, so he sincerely thanked the bartender before leaving.
+
+Possible questions and corresponding answers:
+Q: Does the man have a chronic illness? A: Unknown
+Q: Was the man scared away? A: No
+Q: Did the bartender want to kill the man? A: No
+Q: Did the bartender intend to scare the man? A: Yes
+Q: Did the man sincerely thank the bartender? A: Yes
+
+### Example 2: The Four-Year-Old Mother
+<Surface>
+A five-year-old kindergartener surprisingly claims that her mother is only four years old. Puzzled, I proposed a home visit. When I arrived at her house, I saw a horrifying scene...
+
+<Bottom>
+I saw several women chained up in her house, with a fierce-looking, ugly brute standing nearby. The kindergartener suddenly displayed an eerie smile uncharacteristic of her age... It turns out she's actually 25 years old but suffers from a condition that prevents her from growing. The brute is her brother, and she lures kindergarten teachers like us to their house to help her brother find women... Her "four-year-old mother" is actually a woman who was tricked and has been held captive for four years...
+
+Possible questions and corresponding answers:
+Q: Is the child already dead? A: No
+Q: Is the child actually an adult? A: Yes
+Q: Does the child have schizophrenia? A: Unknown
+Q: Am I in danger? A: Yes
+
+## Question Content
+### Surface
+{surface}
+
+### Bottom
+{bottom}
+
+Now, please judge the following player questions:
+"""
+
     def _ask_sp(self, action: ActionASK) -> StepResult:
-        """Ask a yes/no question for SP."""
+        """Ask a yes/no question for SP using AR-Bench's referee prompt."""
         if not self.llm:
             raise ValueError("LLM wrapper required for SP task")
 
         question = action.question
-        ground_truth = self.current_puzzle.get("explanation",
-                        self.current_puzzle.get("bottom", ""))
+        surface = self.current_puzzle.get("surface",
+                   self.current_puzzle.get("initial_information", ""))
+        bottom = self.current_puzzle.get("explanation",
+                  self.current_puzzle.get("bottom", ""))
 
-        # Simple NPC: determine if question answer is yes/no based on story
-        npc_prompt = f"""You are hosting a situation puzzle game. The hidden story is:
+        system_prompt = self.SP_REFEREE_TEMPLATE.format(
+            surface=surface, bottom=bottom
+        )
 
-{ground_truth}
-
-A player asks: "{question}"
-
-Based on the hidden story, answer with exactly one of: YES, NO, or IRRELEVANT.
-Only answer with the single word."""
+        # Build conversation: system prompt + previous Q&A + new question
+        messages = [{"role": "system", "content": system_prompt}]
+        for h in self.history:
+            messages.append({"role": "user", "content": h["question"]})
+            messages.append({"role": "assistant", "content": h["feedback"]})
+        messages.append({"role": "user", "content": question})
 
         response = self.llm.generate(
-            messages=[{"role": "user", "content": npc_prompt}],
+            messages=messages,
             temperature=0.3,
             max_tokens=32,
         )
 
-        feedback = response.content.strip().upper()
-        if "YES" in feedback:
-            feedback = "YES"
-        elif "NO" in feedback:
-            feedback = "NO"
+        # Normalize to Yes/No/Unknown (AR-Bench labels)
+        raw = response.content.strip()
+        raw_upper = raw.upper()
+        if raw_upper.startswith("YES") or raw_upper == "YES":
+            feedback = "Yes"
+        elif raw_upper.startswith("NO") or raw_upper == "NO":
+            feedback = "No"
         else:
-            feedback = "IRRELEVANT"
+            feedback = "Unknown"
 
         self.history.append({
             "turn": self.turn,

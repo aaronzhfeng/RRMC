@@ -14,6 +14,9 @@ from .stopping_rules import (
     SemanticEntropyStopping,
     MIOnlyStopping,
     RobustMIStopping,
+    KnowNoStopping,
+    CIPLiteStopping,
+    UoTLiteStopping,
 )
 
 
@@ -25,6 +28,9 @@ METHODS: Dict[str, type] = {
     "semantic_entropy": SemanticEntropyStopping,
     "mi_only": MIOnlyStopping,
     "robust_mi": RobustMIStopping,
+    "knowno": KnowNoStopping,
+    "cip_lite": CIPLiteStopping,
+    "uot_lite": UoTLiteStopping,
 }
 
 

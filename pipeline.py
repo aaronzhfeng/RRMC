@@ -15,8 +15,10 @@ from config import Config, get_method_config
 from rrmc.core.llm import LLMWrapper, load_api_key_from_env_file
 from rrmc.core.environment import TaskType
 from rrmc.core.clustering import SemanticClusterer
+from rrmc.core.mi_estimator import RobustMI
 from rrmc.evaluation.evaluator import RRMCEvaluator, print_comparison_table
 from rrmc.methods import get_method
+from rrmc.methods.question_selector import VoIQuestionSelector
 
 
 class Pipeline:
@@ -180,7 +182,33 @@ class Pipeline:
             print(f"Data: {test_path}")
 
         max_workers = self.config.get("max_workers", 8)
-        
+
+        # Create VoI question selector if enabled (DC only)
+        question_selector = None
+        if self.config.get("use_voi", False) and task_str == "dc":
+            clusterer = SemanticClusterer(use_entailment=False)
+            robust_mi = RobustMI(
+                llm=self.llm,
+                clusterer=clusterer,
+                k_samples=self.config.get("k_samples", 4),
+                temperature=self.config.get("temperature", 0.7),
+                use_diversity_sampling=self.config.get("use_diversity_sampling", True),
+                regime=self.config.get("regime", "normal"),
+            )
+            question_selector = VoIQuestionSelector(
+                llm=self.llm,
+                clusterer=clusterer,
+                robust_mi=robust_mi,
+                m_candidates=self.config.get("voi_m_candidates", 5),
+                r_simulations=self.config.get("voi_r_simulations", 2),
+                k_samples=self.config.get("k_samples", 4),
+                variants=self.config.get("variants", ["base", "skeptical"]),
+                use_dpp=self.config.get("use_dpp", False),
+                dpp_slate_size=self.config.get("dpp_slate_size", 3),
+            )
+            if verbose:
+                print(f"VoI question selection: M={question_selector.m_candidates}, R={question_selector.r_simulations}")
+
         self.evaluator = RRMCEvaluator(
             llm=self.llm,
             data_path=test_path,
@@ -189,6 +217,7 @@ class Pipeline:
             output_dir=self.config.get("output_dir", "results"),
             regime=self.config.get("regime", "normal"),
             max_workers=max_workers,
+            question_selector=question_selector,
         )
 
         # Initialize train evaluator if calibrating
@@ -395,7 +424,8 @@ class Pipeline:
         }
 
         # Add clusterer for methods that need it
-        if method_name in ["self_consistency", "semantic_entropy", "mi_only", "robust_mi"]:
+        if method_name in ["self_consistency", "semantic_entropy", "mi_only", "robust_mi", 
+                           "knowno", "cip_lite", "uot_lite"]:
             kwargs["clusterer"] = self.evaluator.clusterer
 
         # Method-specific settings (experiment config overrides method config)
@@ -443,6 +473,24 @@ class Pipeline:
             if isinstance(variants, str):
                 variants = [v.strip() for v in variants.split(",")]
             kwargs["variants"] = variants
+        elif method_name == "knowno":
+            kwargs["k_samples"] = self.config.get(
+                "k_samples", method_cfg.get("k_samples", 10)
+            )
+            kwargs["set_size_threshold"] = self.config.get(
+                "set_size_threshold", method_cfg.get("set_size_threshold", 1)
+            )
+        elif method_name == "cip_lite":
+            kwargs["k_samples"] = self.config.get(
+                "k_samples", method_cfg.get("k_samples", 10)
+            )
+            kwargs["set_size_threshold"] = self.config.get(
+                "set_size_threshold", method_cfg.get("set_size_threshold", 2)
+            )
+        elif method_name == "uot_lite":
+            kwargs["k_samples"] = self.config.get(
+                "k_samples", method_cfg.get("k_samples", 6)
+            )
 
         return get_method(method_name, **kwargs)
 

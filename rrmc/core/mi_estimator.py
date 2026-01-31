@@ -5,6 +5,7 @@ Implements the core uncertainty estimation via MI between
 initial and revised model answers.
 """
 
+import hashlib
 import json
 import re
 from typing import List, Dict, Optional, Tuple, Any
@@ -137,10 +138,23 @@ class SelfRevisionMI:
         self.diversity_sampler = diversity_sampler
         self.regime = regime
 
+        # MI estimation cache: (task_type, state_hash, variant) -> MIEstimate
+        self._cache: Dict[str, MIEstimate] = {}
+        self._cache_enabled = True
+
         # Homogeneous regime uses low temperature to induce mode collapse
         if regime == "homogeneous":
             self.temperature = 0.1
             self.top_p = 1.0
+
+    @staticmethod
+    def _state_hash(task_type: str, state: Dict[str, Any], variant: str) -> str:
+        """Deterministic hash for cache key."""
+        key_data = json.dumps(
+            {"task": task_type, "history": state.get("history_string", ""), "variant": variant},
+            sort_keys=True,
+        )
+        return hashlib.sha256(key_data.encode()).hexdigest()[:16]
 
     def estimate(
         self,
@@ -159,6 +173,12 @@ class SelfRevisionMI:
         Returns:
             MIEstimate with MI value and sample info
         """
+        # Check cache
+        if self._cache_enabled:
+            cache_key = self._state_hash(task_type, state, revision_variant)
+            if cache_key in self._cache:
+                return self._cache[cache_key]
+
         # Get appropriate prompts
         initial_prompt = self._get_initial_prompt(task_type, state)
         revision_prompt_template = self._get_revision_prompt(revision_variant)
@@ -187,7 +207,7 @@ class SelfRevisionMI:
         n_initial_clusters = len(set(c0))
         n_revised_clusters = len(set(c1))
 
-        return MIEstimate(
+        result = MIEstimate(
             mi=mi,
             n_samples=self.k_samples,
             n_initial_clusters=n_initial_clusters,
@@ -196,6 +216,12 @@ class SelfRevisionMI:
             revised_answers=revised_answers,
             weights=weights,
         )
+
+        # Store in cache
+        if self._cache_enabled:
+            self._cache[cache_key] = result
+
+        return result
 
     def _sample_standard(
         self,

@@ -148,11 +148,19 @@ def load_config(
 
     # Load experiment config
     if experiment:
-        # Check if it's a path or an experiment name
-        if experiment.endswith('.yaml') or '/' in experiment:
-            exp_path = Path(experiment)
+        # Check if it's a path or an experiment name (supports nested experiment names like
+        # "dc_methods/fixed_turns" -> configs/experiments/dc_methods/fixed_turns.yaml).
+        exp_arg = str(experiment)
+        exp_as_path = Path(exp_arg)
+
+        # Treat as a filesystem path if:
+        # - it explicitly looks like a yaml path, OR
+        # - it is absolute, OR
+        # - it exists on disk (relative or absolute)
+        if exp_arg.endswith(".yaml") or exp_as_path.is_absolute() or exp_as_path.exists():
+            exp_path = exp_as_path
         else:
-            exp_path = config_dir / "experiments" / f"{experiment}.yaml"
+            exp_path = config_dir / "experiments" / f"{exp_arg}.yaml"
 
         if exp_path.exists():
             exp_config = load_yaml(exp_path)
@@ -198,4 +206,10 @@ def list_experiments(config_dir: Optional[Path] = None) -> list:
     if not exp_dir.exists():
         return []
 
-    return [p.stem for p in exp_dir.glob("*.yaml")]
+    # Include nested experiments (e.g. experiments/dc_methods/*.yaml)
+    names = []
+    for p in exp_dir.rglob("*.yaml"):
+        rel = p.relative_to(exp_dir)
+        # Drop ".yaml" while preserving subdirectories
+        names.append(str(rel.with_suffix("")).replace("\\", "/"))
+    return sorted(names)

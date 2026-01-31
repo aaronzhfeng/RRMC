@@ -5,6 +5,7 @@ LLM Wrapper for RRMC using OpenRouter API.
 import os
 import json
 import re
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any, Union, Callable
@@ -127,6 +128,11 @@ class LLMWrapper:
             base_url=self.base_url,
         )
 
+        # Retry config
+        self.max_retries = 3
+        self.retry_base_delay = 1.0  # seconds
+        self.retry_max_delay = 30.0  # seconds
+
         # Thread-safe token tracking
         self._lock = threading.Lock()
         self.total_prompt_tokens = 0
@@ -178,46 +184,57 @@ class LLMWrapper:
                 provider_dict = dict(provider_dict.__dict__)
             kwargs["extra_body"] = {"provider": provider_dict}
 
-        try:
-            response = self.client.chat.completions.create(**kwargs)
-            message = response.choices[0].message
-            content = message.content or ""
-            # Some providers return reasoning separately (content may be empty)
-            if not content:
-                reasoning = getattr(message, "reasoning", None)
-                if reasoning:
-                    content = reasoning
-            prompt_tokens = response.usage.prompt_tokens if response.usage else 0
-            completion_tokens = response.usage.completion_tokens if response.usage else 0
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+                message = response.choices[0].message
+                content = message.content or ""
+                # Some providers return reasoning separately (content may be empty)
+                if not content:
+                    reasoning = getattr(message, "reasoning", None)
+                    if reasoning:
+                        content = reasoning
+                prompt_tokens = response.usage.prompt_tokens if response.usage else 0
+                completion_tokens = response.usage.completion_tokens if response.usage else 0
 
-            # Strip Qwen3's <think> tags to get clean output
-            raw_content = content
-            cleaned = strip_think_tags(content)
-            content = cleaned if cleaned else raw_content.strip()
+                # Strip Qwen3's <think> tags to get clean output
+                raw_content = content
+                cleaned = strip_think_tags(content)
+                content = cleaned if cleaned else raw_content.strip()
 
-            # Thread-safe token tracking
-            with self._lock:
-                self.total_prompt_tokens += prompt_tokens
-                self.total_completion_tokens += completion_tokens
-                self.call_count += 1
+                # Thread-safe token tracking
+                with self._lock:
+                    self.total_prompt_tokens += prompt_tokens
+                    self.total_completion_tokens += completion_tokens
+                    self.call_count += 1
 
-            # Update progress bar if callback is set
-            if self.progress_callback:
-                self.progress_callback(1)
+                # Update progress bar if callback is set
+                if self.progress_callback:
+                    self.progress_callback(1)
 
-            return LLMResponse(
-                content=content,
-                raw_content=raw_content,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-        except Exception as e:
-            print(f"LLM inference error: {e}")
-            with self._lock:
-                self.call_count += 1
-            if self.progress_callback:
-                self.progress_callback(1)
-            return LLMResponse(content="", raw_content="", prompt_tokens=0, completion_tokens=0)
+                return LLMResponse(
+                    content=content,
+                    raw_content=raw_content,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+            except Exception as e:
+                last_error = e
+                if attempt < self.max_retries - 1:
+                    delay = min(
+                        self.retry_base_delay * (2 ** attempt),
+                        self.retry_max_delay,
+                    )
+                    time.sleep(delay)
+
+        # All retries exhausted
+        print(f"LLM inference error after {self.max_retries} attempts: {last_error}")
+        with self._lock:
+            self.call_count += 1
+        if self.progress_callback:
+            self.progress_callback(1)
+        return LLMResponse(content="", raw_content="", prompt_tokens=0, completion_tokens=0)
 
     def sample_n(
         self,

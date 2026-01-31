@@ -23,6 +23,12 @@ from ..core.clustering import SemanticClusterer
 from ..core.mi_estimator import RobustMI
 from ..core.calibration import RiskControlledCalibrator, CalibrationResult
 from ..core.mi_estimator import compute_homogeneity_score
+from .metrics import (
+    generate_metrics_report,
+    bootstrap_accuracy_ci,
+    bootstrap_turns_ci,
+    MetricsReport,
+)
 from ..methods import get_method
 from ..methods.stopping_rules import (
     BaseStoppingRule,
@@ -32,7 +38,11 @@ from ..methods.stopping_rules import (
     SemanticEntropyStopping,
     MIOnlyStopping,
     RobustMIStopping,
+    KnowNoStopping,
+    CIPLiteStopping,
+    UoTLiteStopping,
 )
+from ..methods.question_selector import VoIQuestionSelector, QuestionSelectionResult
 
 
 # =============================================================================
@@ -490,6 +500,7 @@ class RRMCEvaluator:
         output_dir: str = "./results",
         regime: str = "normal",
         max_workers: int = 5,
+        question_selector: Optional[VoIQuestionSelector] = None,
     ):
         """
         Initialize evaluator.
@@ -502,6 +513,7 @@ class RRMCEvaluator:
             output_dir: Directory for saving results
             regime: Decoding regime ("normal" or "homogeneous")
             max_workers: Max concurrent puzzle evaluations (default: 5)
+            question_selector: Optional VoI question selector for DC
         """
         self.llm = llm
         self.data_path = data_path
@@ -510,6 +522,7 @@ class RRMCEvaluator:
         self.output_dir = output_dir
         self.regime = regime
         self.max_workers = max_workers
+        self.question_selector = question_selector
 
         # Initialize environment (for sequential runs and metadata)
         self.env = ARBenchEnv(
@@ -647,11 +660,11 @@ class RRMCEvaluator:
 
             # Make stopping decision
             decision = stopping_rule.should_stop(task_type_str, state, turn)
-            mi_scores.append(decision.score)
+            mi_scores.append(float(decision.score))
             decisions.append({
                 "turn": turn,
-                "score": decision.score,
-                "should_stop": decision.should_stop,
+                "score": float(decision.score),
+                "should_stop": bool(decision.should_stop),
                 "reason": decision.reason,
             })
 
@@ -976,11 +989,11 @@ class RRMCEvaluator:
 
             # Make stopping decision
             decision = stopping_rule.should_stop(task_type_str, state, turn)
-            mi_scores.append(decision.score)
+            mi_scores.append(float(decision.score))
             decisions.append({
                 "turn": turn,
-                "score": decision.score,
-                "should_stop": decision.should_stop,
+                "score": float(decision.score),
+                "should_stop": bool(decision.should_stop),
                 "reason": decision.reason,
             })
 
@@ -992,11 +1005,22 @@ class RRMCEvaluator:
                 result = env.step(ActionANSWER(answer=answer))
                 break
             else:
-                # Generate and ask question using conversation manager
-                if self.task_type == TaskType.DC:
+                # Generate and ask question
+                if self.task_type == TaskType.DC and self.question_selector is not None:
+                    # Use VoI question selector
+                    current_mi = decision.score
+                    selection = self.question_selector.select_question(
+                        task_type=task_type_str,
+                        state=state,
+                        current_mi=current_mi,
+                    )
+                    question = selection.selected.question
+                    suspect = selection.selected.suspect
+                    result = env.step(ActionASK(question=question, suspect=suspect))
+                    conv_manager.add_feedback(result.observation)
+                elif self.task_type == TaskType.DC:
                     question, suspect = conv_manager.generate_question(turn)
                     result = env.step(ActionASK(question=question, suspect=suspect))
-                    # Add NPC feedback to conversation for next turn
                     conv_manager.add_feedback(result.observation)
                 elif self.task_type == TaskType.SP:
                     question = conv_manager.generate_question(turn)
@@ -1074,16 +1098,23 @@ class RRMCEvaluator:
         method_name = results[0].method
         correct_count = sum(1 for r in results if r.correct)
         total_turns = sum(r.turns_used for r in results)
-        
+
         accuracy = correct_count / len(puzzle_indices) if puzzle_indices else 0.0
         avg_turns = total_turns / len(puzzle_indices) if puzzle_indices else 0.0
         std_turns = np.std([r.turns_used for r in results]) if results else 0.0
         avg_mi = np.mean([np.mean(r.mi_scores) if r.mi_scores else 0.0 for r in results])
 
-        if verbose:
-            print(f"  Results: Accuracy={accuracy:.2%}, Avg Turns={avg_turns:.1f}")
+        # Compute bootstrap CIs
+        correct_flags = [r.correct for r in results]
+        turns_list = [r.turns_used for r in results]
+        acc_ci = bootstrap_accuracy_ci(correct_flags)
+        turns_ci_result = bootstrap_turns_ci(turns_list)
 
-        return EvaluationResult(
+        if verbose:
+            print(f"  Results: Accuracy={accuracy:.2%} [{acc_ci.ci_lower:.2%}, {acc_ci.ci_upper:.2%}], "
+                  f"Avg Turns={avg_turns:.1f} [{turns_ci_result.ci_lower:.1f}, {turns_ci_result.ci_upper:.1f}]")
+
+        eval_result = EvaluationResult(
             method=method_name,
             task_type=self.task_type.value,
             n_episodes=len(puzzle_indices),
@@ -1093,6 +1124,10 @@ class RRMCEvaluator:
             avg_mi=avg_mi,
             episode_results=results,
         )
+        # Attach CIs as extra attributes
+        eval_result.accuracy_ci = acc_ci
+        eval_result.turns_ci = turns_ci_result
+        return eval_result
 
     def run_comparison(
         self,
@@ -1172,43 +1207,8 @@ class RRMCEvaluator:
             raise ValueError(f"Unknown method: {method}")
 
     def _save_results(self, results: Dict[str, EvaluationResult]):
-        """Save results to file."""
+        """Save results to per-method files only (no comparison JSON)."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"comparison_{self.task_type.value}_{timestamp}.json"
-        filepath = os.path.join(self.output_dir, filename)
-
-        # Convert to serializable format
-        output = {}
-        for method, result in results.items():
-            output[method] = {
-                "method": result.method,
-                "task_type": result.task_type,
-                "n_episodes": result.n_episodes,
-                "accuracy": result.accuracy,
-                "avg_turns": result.avg_turns,
-                "std_turns": result.std_turns,
-                "avg_mi": result.avg_mi,
-                "episodes": [
-                    {
-                        "puzzle_idx": ep.puzzle_idx,
-                        "correct": ep.correct,
-                        "prediction": str(ep.prediction),
-                        "ground_truth": str(ep.ground_truth),
-                        "turns_used": ep.turns_used,
-                        "mi_scores": ep.mi_scores,
-                        "total_time": ep.total_time,
-                        "raw_answer": ep.raw_answer,
-                        "raw_samples": ep.raw_samples,
-                        "history": ep.history,  # Include turn-by-turn history
-                    }
-                    for ep in result.episode_results
-                ],
-            }
-
-        with open(filepath, "w") as f:
-            json.dump(output, f, indent=2)
-
-        print(f"\nResults saved to: {filepath}")
         self._save_arbench_results(results, timestamp)
 
     def _save_arbench_results(self, results: Dict[str, EvaluationResult], timestamp: str) -> None:
@@ -1704,17 +1704,27 @@ def print_comparison_table(
     results: Dict[str, EvaluationResult],
     mi_error_correlation: Optional[Dict[str, float]] = None,
 ):
-    """Print a comparison table of results."""
-    print("\n" + "=" * 70)
+    """Print a comparison table of results with bootstrap 95% CIs."""
+    print("\n" + "=" * 90)
     print("COMPARISON RESULTS")
-    print("=" * 70)
-    print(f"{'Method':<25} {'Accuracy':>10} {'Avg Turns':>12} {'Std Turns':>10}")
-    print("-" * 70)
+    print("=" * 90)
+    print(f"{'Method':<25} {'Accuracy':>10} {'95% CI':>16} {'Avg Turns':>10} {'95% CI':>16}")
+    print("-" * 90)
 
     for method, result in sorted(results.items(), key=lambda x: -x[1].accuracy):
-        print(f"{result.method:<25} {result.accuracy:>10.2%} {result.avg_turns:>12.1f} {result.std_turns:>10.2f}")
+        acc_ci = getattr(result, "accuracy_ci", None)
+        turns_ci = getattr(result, "turns_ci", None)
+        if acc_ci:
+            acc_ci_str = f"[{acc_ci.ci_lower:.2%},{acc_ci.ci_upper:.2%}]"
+        else:
+            acc_ci_str = ""
+        if turns_ci:
+            turns_ci_str = f"[{turns_ci.ci_lower:.1f},{turns_ci.ci_upper:.1f}]"
+        else:
+            turns_ci_str = ""
+        print(f"{result.method:<25} {result.accuracy:>10.2%} {acc_ci_str:>16} {result.avg_turns:>10.1f} {turns_ci_str:>16}")
 
-    print("=" * 70)
+    print("=" * 90)
 
     # Print MI-error correlation if available
     if mi_error_correlation is not None:
@@ -1723,4 +1733,4 @@ def print_comparison_table(
         print(f"  p-value = {mi_error_correlation['pvalue']:.4f}")
         if mi_error_correlation['rho'] < 0:
             print("  (Negative ρ indicates lower MI → fewer errors, as expected)")
-        print("=" * 70)
+        print("=" * 90)
