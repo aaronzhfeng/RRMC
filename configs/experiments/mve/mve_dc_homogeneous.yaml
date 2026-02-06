@@ -1,6 +1,6 @@
-# MVE: Situation Puzzles with Normal Decoding
-experiment_name: mve_sp_normal
-task: sp
+# MVE: Detective Cases with Homogeneous Decoding (stress test)
+experiment_name: mve/mve_dc_homogeneous
+task: dc
 data_subset: test
 
 # Methods to compare
@@ -14,7 +14,7 @@ methods:
 calibrate: true
 n_train: 20
 n_test: 10
-regime: normal
+regime: homogeneous  # Low temperature for mode collapse stress test
 
 # MI estimation
 k_samples: 4

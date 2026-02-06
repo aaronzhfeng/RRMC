@@ -1,5 +1,3 @@
 # Fixed Turns Stopping Rule
 method: fixed_turns
-# For GN task, use more turns (50 for full game)
-# For DC/SP task, 10 is usually sufficient
-fixed_turns: 50
+fixed_turns: 10  # Default for DC; override per experiment

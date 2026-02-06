@@ -1,6 +1,6 @@
-# MVE: Detective Cases with Normal Decoding
-experiment_name: mve_dc_normal
-task: dc
+# MVE: Situation Puzzles with Normal Decoding
+experiment_name: mve/mve_sp_normal
+task: sp
 data_subset: test
 
 # Methods to compare

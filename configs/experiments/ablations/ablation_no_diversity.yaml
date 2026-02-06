@@ -1,5 +1,5 @@
 # Ablation: Robust MI without Diversity Sampling
-experiment_name: ablation_no_diversity
+experiment_name: ablations/ablation_no_diversity
 task: dc
 data_subset: test
 

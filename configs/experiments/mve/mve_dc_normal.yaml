@@ -1,5 +1,5 @@
-# MVE: Detective Cases with Homogeneous Decoding (stress test)
-experiment_name: mve_dc_homogeneous
+# MVE: Detective Cases with Normal Decoding
+experiment_name: mve/mve_dc_normal
 task: dc
 data_subset: test
 
@@ -14,7 +14,7 @@ methods:
 calibrate: true
 n_train: 20
 n_test: 10
-regime: homogeneous  # Low temperature for mode collapse stress test
+regime: normal
 
 # MI estimation
 k_samples: 4
