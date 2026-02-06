@@ -15,6 +15,7 @@
 
 \usepackage{amsmath}
 \usepackage{amssymb}
+\usepackage{pifont}
 
 % Colors
 \definecolor{winnergreen}{RGB}{39, 174, 96}
@@ -54,18 +55,21 @@
       Verb.\ Confidence & 30\%        & 23.1 & 1$\times$   & never stops \\
       MI-Only          & 25\%         & 4.1  & 1$\times$   & MI=0 at T1 \\
       \midrule
-      AllSuspects+CIP  & 15\%         & 6.6  & 1$\times$   & \textcolor{errorred}{$\downarrow$30\%} \\
-      Ensemble+AS+CIP  & 25\%         & 7.0  & 8$\times$   & \textcolor{errorred}{$\downarrow$20\%} \\
+      AllSuspects+CIP  & 15\%         & 6.6  & 1$\times$   & \textcolor{errorred}{$\downarrow$30pp} \\
+      Ensemble+AS+CIP  & 25\%         & 7.0  & 8$\times$   & \textcolor{errorred}{$\downarrow$20pp} \\
+      \midrule
+      \rowcolor{winnergreen!20}
+      \textbf{DQS + Fixed(10)} & \textbf{60\%} & \textbf{10.0} & \textbf{11$\times$} & \textcolor{winnergreen}{\textbf{$\uparrow$30pp}} \\
       \bottomrule
     \end{tabular}
   \end{table}
 
   \vspace{0.2cm}
 
-  \begin{alertblock}{}
-    AllSuspects: 45\% $\rightarrow$ 15\%. \quad
-    Ensemble + AllSuspects: 45\% $\rightarrow$ 25\% at 8$\times$ cost.
-  \end{alertblock}
+  \begin{exampleblock}{}
+    DQS is the \textbf{only method that improves} over baseline: 30\% $\rightarrow$ 60\%.
+    AllSuspects/Ensemble both degrade.
+  \end{exampleblock}
 \end{frame}
 
 %==============================================================================
@@ -127,113 +131,134 @@
 \end{frame}
 
 %==============================================================================
-\section{Ensemble Failure Mode}
+\section{Why AllSuspects \& Ensemble Fail}
 %==============================================================================
 
-\begin{frame}{Ensemble Consensus Is Anti-Correlated with Correctness}
+\begin{frame}{AllSuspects Failure: Puzzle 1 — Correct $\rightarrow$ Wrong}
+
+  \small
+  Victim: Dr.\ Jonathan Reed \quad | \quad Guilty: \textbf{Evelyn Carter (\#0)}
+
+  \vspace{0.2cm}
 
   \begin{columns}[T]
-    \begin{column}{0.42\textwidth}
+    \begin{column}{0.48\textwidth}
+      \textbf{Baseline}: \textcolor{winnergreen}{\checkmark} Evelyn Carter (T1)
+
+      \vspace{0.1cm}
+
+      Reads case background $\rightarrow$ immediately identifies Carter.
+
+      \vspace{0.3cm}
+
+      \textbf{AllSuspects}: \textcolor{errorred}{\ding{55}} Samantha Greene (T6)
+
+      \vspace{0.1cm}
+
+      Forced to question all 5 suspects:
+
+      \vspace{0.1cm}
+      \footnotesize
+      \begin{tabular}{rl}
+        T1: & Carter --- ``I was at home, reviewing data.'' \\
+        T2: & Whitmore --- ``I was at home, relaxing.'' \\
+        T3: & Collins --- ``I was at home, making sense.'' \\
+        T4: & Donovan --- ``I was at home, relaxing.'' \\
+        T5: & Greene --- ``I was at home watching a movie, \\
+            & \quad but I heard a \textbf{sighting near the park}.'' \\
+      \end{tabular}
+    \end{column}
+
+    \begin{column}{0.48\textwidth}
+      \begin{alertblock}{What went wrong}
+        Every suspect says ``I was at home.''
+
+        \vspace{0.1cm}
+
+        Greene adds one irrelevant detail (``sighting near the park'')
+        $\rightarrow$ model latches onto it as evidence
+        $\rightarrow$ \textbf{changes answer from Carter to Greene}.
+
+        \vspace{0.1cm}
+
+        The NPC responses carry \textbf{no signal} — all generic alibis.
+        The model over-interprets minor phrasing differences.
+      \end{alertblock}
+
+      \vspace{0.2cm}
+
+      \begin{block}{Pattern}
+        7 of 20 puzzles: baseline correct, AllSuspects flipped it wrong.
+        Only 1 puzzle went the other direction.
+        \textbf{Ratio: 7:1 against.}
+      \end{block}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Ensemble Failure: Puzzle 6 — 80\% Confident and Wrong}
+
+  \small
+  Guilty: \textbf{Michael Turner (\#1)}
+
+  \vspace{0.2cm}
+
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
       \begin{table}
         \centering
         \small
-        \begin{tabular}{ccc}
+        \begin{tabular}{lccc}
           \toprule
-          \textbf{Consensus} & \textbf{n} & \textbf{Acc} \\
+          \textbf{Method} & \textbf{Pred} & \textbf{Correct?} \\
           \midrule
-          2/6 (33\%) & 6 & 17\% \\
-          3/6 (50\%) & 8 & 38\% \\
+          Baseline & \#1 Turner & \textcolor{winnergreen}{\checkmark} \\
+          AllSuspects & \#1 Turner & \textcolor{winnergreen}{\checkmark} \\
           \rowcolor{errorred!15}
-          4/6 (67\%) & 6 & \textbf{17\%} \\
+          Ensemble & \#0 Carter & \textcolor{errorred}{\ding{55}} \\
           \bottomrule
         \end{tabular}
       \end{table}
 
       \vspace{0.2cm}
 
-      No puzzle reached 5/6 or 6/6.
+      Ensemble consensus: \textbf{4/5 trajectories} (80\%) voted for
+      the \textbf{wrong} suspect.
 
       \vspace{0.2cm}
 
-      Higher confidence $\not\Rightarrow$ correctness.
+      Both baseline and AllSuspects got it right independently —
+      the ensemble \textbf{killed} the correct answer.
     \end{column}
 
-    \begin{column}{0.55\textwidth}
-      \begin{block}{Root cause: correlated errors}
-        \begin{itemize}
-          \item Qwen 7B has \textbf{systematic biases}
-                (suspects the ``most vocal'' character)
-          \item 6 trajectories with temperature 0.5--1.0
-                make the \textbf{same mistake}
-          \item Majority vote \textbf{locks in} the wrong answer
-        \end{itemize}
-      \end{block}
-
-      \vspace{0.2cm}
-
-      \textbf{Example (Puzzle 6):}
-
-      \small
-      Baseline \& AllSuspects: \textcolor{winnergreen}{\checkmark} correct.
-
-      Ensemble: 4/5 vote for wrong suspect at 80\% confidence.
-
-      $\rightarrow$ Ensemble \textbf{killed} the correct answer.
-    \end{column}
-  \end{columns}
-\end{frame}
-
-%==============================================================================
-\section{Why Intuitions Failed}
-%==============================================================================
-
-\begin{frame}{More Investigation $\neq$ Better Decisions}
-
-  \begin{table}
-    \centering
-    \small
-    \begin{tabular}{p{4cm}p{5.5cm}p{4cm}}
-      \toprule
-      \textbf{Intuition} & \textbf{Reality} & \textbf{Evidence} \\
-      \midrule
-      ``Stopping at T1 is premature'' &
-        T1 accuracy (47\%) is 3$\times$ AllSuspects (15\%) &
-        Case background is the strongest signal \\
-      \addlinespace
-      ``Question all suspects for fair coverage'' &
-        NPC responses are generic, undifferentiated &
-        7:1 degradation ratio \\
-      \addlinespace
-      ``Ensemble reduces variance'' &
-        Errors are correlated, not independent &
-        Consensus anti-correlates with accuracy \\
-      \bottomrule
-    \end{tabular}
-  \end{table}
-
-  \vspace{0.3cm}
-
-  \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \begin{block}{The bottleneck}
-        NPC response quality, not stopping rules.
+      \begin{alertblock}{What happened}
+        All 6 trajectories run at the \textbf{same temperature}\footnotemark.
+        The model has a systematic bias toward Carter
+        (most narrative connection to victim).
 
-        \small
-        \begin{tabular}{lc}
-          Case background & \textcolor{winnergreen}{High signal} \\
-          NPC turns 1--5 & \textcolor{warningorange}{Low signal} \\
-          NPC turns 5+ & \textcolor{errorred}{Noise} \\
-        \end{tabular}
-      \end{block}
-    \end{column}
-    \begin{column}{0.48\textwidth}
-      \begin{alertblock}{Implication}
-        For Qwen 7B on AR-Bench DC, CIP-Lite at Turn 1
-        is \textbf{near-optimal}. Improvement requires
-        better models or better NPCs.
+        \vspace{0.1cm}
+
+        4 of 5 valid trajectories follow the same
+        reasoning path $\rightarrow$ same wrong answer.
+
+        \vspace{0.1cm}
+
+        Majority vote \textbf{amplifies} the bias
+        instead of correcting it.
       \end{alertblock}
+
+      \vspace{0.2cm}
+
+      \begin{block}{Broader pattern}
+        Ensemble consensus anti-correlates with correctness.
+        4/6 consensus: only 17\% accurate.
+        No puzzle reached 5/6 or 6/6.
+      \end{block}
     \end{column}
   \end{columns}
+
+  \footnotetext{Temperature diversity was configured but not applied due to a wiring bug. All trajectories ran at temp=0.7.}
 \end{frame}
 
 %==============================================================================
@@ -293,6 +318,53 @@
 
   \small
   Works for both DC (suspects/questions) and GN (guesses/feedback).
+\end{frame}
+
+\begin{frame}{DC + DQS: The First Method That Actually Helps}
+
+  \begin{table}
+    \centering
+    \begin{tabular}{lcccc}
+      \toprule
+      \textbf{Method} & \textbf{Accuracy} & \textbf{Avg Turns} & \textbf{API Calls} & \textbf{Cost} \\
+      \midrule
+      Fixed Turns (baseline) & 30\% & 10.0 & $\sim$200 & 1$\times$ \\
+      CIP-Lite (best stopping) & 45\% & 1.4 & $\sim$500 & 2.5$\times$ \\
+      AllSuspects + CIP-Lite & 15\% & 6.6 & $\sim$500 & 2.5$\times$ \\
+      Ensemble + AS + CIP-Lite & 25\% & 7.0 & $\sim$4200 & 21$\times$ \\
+      \midrule
+      \rowcolor{winnergreen!20}
+      \textbf{DQS + Fixed Turns} & \textbf{60\%} & \textbf{10.0} & \textbf{2179} & \textbf{11$\times$} \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+
+  \vspace{0.3cm}
+
+  \begin{columns}[T]
+    \begin{column}{0.48\textwidth}
+      \begin{exampleblock}{What DQS proves}
+        \begin{itemize}
+          \item Same 10 turns, \textbf{2$\times$ accuracy}
+          \item The bottleneck was \textbf{question quality},
+                not stopping rules or turn count
+          \item Deliberation over 5 candidates per turn
+                makes NPC responses \textbf{actually informative}
+        \end{itemize}
+      \end{exampleblock}
+    \end{column}
+    \begin{column}{0.48\textwidth}
+      \begin{block}{Why it works}
+        AllSuspects/Ensemble: same bad questions, more of them.
+
+        \vspace{0.2cm}
+
+        DQS: \textbf{better questions} $\rightarrow$ NPCs reveal
+        discriminative information $\rightarrow$ model can identify
+        the guilty suspect.
+      \end{block}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 %==============================================================================
@@ -358,49 +430,118 @@
   \end{columns}
 \end{frame}
 
-\begin{frame}{GN + DQS: Results Pending}
+\begin{frame}{GN + DQS: Deliberation Cannot Fix Reasoning}
 
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \textbf{What DQS does for GN:}
+      \begin{table}
+        \centering
+        \small
+        \begin{tabular}{lccc}
+          \toprule
+          \textbf{Method} & \textbf{Acc} & \textbf{Turns} & \textbf{Calls} \\
+          \midrule
+          GN Baseline & 0\% & 25.0 & 500 \\
+          \rowcolor{warningorange!15}
+          GN + DQS & 5\% & 24.7 & 7640 \\
+          \midrule
+          \textit{(Optimal)} & \textit{100\%} & \textit{5.5} & \textit{--} \\
+          \bottomrule
+        \end{tabular}
+      \end{table}
 
-      \begin{enumerate}
-        \item M parallel LLM calls: each proposes a guess
-        \item M parallel LLM calls: each imagines the feedback
-        \item 1 orchestrator call: picks the most informative guess
-      \end{enumerate}
+      \vspace{0.2cm}
 
-      \vspace{0.3cm}
-
-      \textbf{Key question:}
-
-      Can the LLM select better guesses when it
-      \textit{deliberates} about possible outcomes,
-      even though it can't track constraints?
+      1 out of 20 correct.
+      15$\times$ the cost. 73 minutes.
     \end{column}
 
+    \begin{column}{0.52\textwidth}
+      \begin{alertblock}{DQS helps DC but not GN}
+        \textbf{DC:} DQS picks better \textit{questions}
+        $\rightarrow$ NPCs give more useful answers
+        $\rightarrow$ model can identify the suspect.
+
+        \vspace{0.2cm}
+
+        \textbf{GN:} DQS picks better \textit{guesses}
+        $\rightarrow$ feedback is already precise (bulls/cows)
+        $\rightarrow$ but model \textbf{still can't use it}.
+      \end{alertblock}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{GN Deep Dive: DQS Doesn't Get Closer Either}
+
+  \begin{columns}[T]
     \begin{column}{0.48\textwidth}
       \begin{table}
         \centering
         \small
         \begin{tabular}{lcc}
           \toprule
-          \textbf{Method} & \textbf{Acc} & \textbf{Turns} \\
+          \textbf{Metric} & \textbf{Base} & \textbf{DQS} \\
           \midrule
-          GN Baseline & 0\% & 25.0 \\
-          GN + DQS & \textit{running} & \textit{running} \\
-          \midrule
-          \textit{(Optimal)} & \textit{100\%} & \textit{5.5} \\
+          Avg best-bulls in play & \textbf{2.0} & 1.9 \\
+          Reached 3+ bulls & \textbf{5} & 2 \\
+          Reached 2+ bulls & 16 & 17 \\
+          Avg final-pred bulls & 1.1 & 1.1 \\
           \bottomrule
         \end{tabular}
       \end{table}
 
+      \vspace{0.2cm}
+
+      \textbf{Per-puzzle comparison:}
+      \begin{table}
+        \centering
+        \small
+        \begin{tabular}{lc}
+          \toprule
+          \textbf{Who got closer?} & \textbf{n} \\
+          \midrule
+          Baseline closer & \textbf{5} \\
+          DQS closer & 3 \\
+          Tied & 12 \\
+          \bottomrule
+        \end{tabular}
+      \end{table}
+    \end{column}
+
+    \begin{column}{0.52\textwidth}
+      \textbf{Example — Puzzle 0 (secret = 8362):}
+
+      \vspace{0.1cm}
+      \small
+
+      \textbf{Baseline:} Guessed \texttt{8367} at T14 (\textbf{3 bulls!})
+
+      \quad $\rightarrow$ then guessed \texttt{2591}, \texttt{9183}\ldots
+
+      \quad $\rightarrow$ threw away the near-miss.
+
+      \vspace{0.2cm}
+
+      \textbf{DQS:} Best guess was 0 bulls all game.
+
+      \quad $\rightarrow$ deliberation didn't help at all.
+
+      \normalsize
       \vspace{0.3cm}
 
-      \begin{block}{Expectation}
-        DQS may improve over 0\% — but unlikely to match
-        optimal play. The LLM's constraint-tracking
-        limitation is fundamental.
+      \begin{block}{Conclusion}
+        DQS improves the \textbf{input side}
+        (which question/guess to make).
+
+        \vspace{0.1cm}
+
+        It cannot fix the \textbf{output side}
+        (reasoning about feedback to narrow possibilities).
+
+        \vspace{0.1cm}
+
+        For GN, the output side is the bottleneck.
       \end{block}
     \end{column}
   \end{columns}
@@ -413,16 +554,16 @@
 \begin{frame}{Week 5 Findings}
 
   \begin{enumerate}
-    \item \textbf{DC: CIP-Lite at Turn 1 is near-optimal for Qwen 7B}
+    \item \textbf{DQS doubles DC accuracy: 30\% $\rightarrow$ 60\%}
 
     \small
-    Model's case-background comprehension is its best signal.
-    NPC responses degrade accuracy monotonically.
+    The \textbf{only} method that improved over baseline.
+    Same turns, better questions. ``Ask smarter, not more.''
 
     \normalsize
     \vspace{0.3cm}
 
-    \item \textbf{``Improvements'' consistently hurt}
+    \item \textbf{AllSuspects and Ensemble consistently hurt}
 
     \small
     AllSuspects: $-$30pp. \quad Ensemble: $-$20pp at 8$\times$ cost.
@@ -431,31 +572,30 @@
     \normalsize
     \vspace{0.3cm}
 
-    \item \textbf{GN: LLM fundamentally cannot track constraints}
+    \item \textbf{The bottleneck is question quality, not stopping rules}
 
     \small
-    0\% accuracy on Bulls \& Cows. Ignores feedback, guesses randomly.
-    DQS may help question selection but can't fix reasoning.
+    CIP-Lite at T1 (45\%) beats all stopping-rule variants.
+    But DQS at T10 (60\%) beats CIP-Lite by asking better questions.
 
     \normalsize
     \vspace{0.3cm}
 
-    \item \textbf{The bottleneck is model capability, not the framework}
+    \item \textbf{GN: DQS can't help when model can't reason (0\% $\rightarrow$ 5\%)}
 
     \small
-    Stopping rules, ensembles, AllSuspects are sound in principle.
-    They need a model that can synthesize multi-turn evidence.
+    DQS improves inputs (questions), not outputs (constraint tracking).
+    15$\times$ cost for +5pp. Fundamental model limitation.
   \end{enumerate}
 \end{frame}
 
 \begin{frame}{Next Steps}
   \begin{itemize}
-    \item \textbf{DQS results} — GN and DC runs in progress
-    \item \textbf{Stronger model} — test GPT-4 / Claude to see if
-          AllSuspects / Ensemble / DQS become beneficial
-    \item \textbf{GN: structured prompting} — step-by-step elimination
-          strategy in system prompt (from AR-Bench templates)
-    \item \textbf{Larger DC evaluation} — 50+ puzzles for reliable metrics
+    \item \textbf{DQS + CIP-Lite} — combine better questions with adaptive stopping
+    \item \textbf{GN DQS} — can deliberation help constraint tracking? (running)
+    \item \textbf{Stronger model} — does DQS benefit scale with model capability?
+    \item \textbf{Larger DC evaluation} — 50+ puzzles; 60\% CI is [40\%, 80\%]
+    \item \textbf{DQS ablations} — vary M (candidates), measure cost-accuracy tradeoff
   \end{itemize}
 
   \vspace{0.5cm}

@@ -1,7 +1,6 @@
 \beamer@sectionintoc {1}{Detective Cases — Stopping Rules}{2}{0}{1}
 \beamer@sectionintoc {2}{The Turn-1 Paradox}{4}{0}{2}
-\beamer@sectionintoc {3}{Ensemble Failure Mode}{6}{0}{3}
-\beamer@sectionintoc {4}{Why Intuitions Failed}{8}{0}{4}
-\beamer@sectionintoc {5}{DQS — Deliberative Question Selection}{10}{0}{5}
-\beamer@sectionintoc {6}{Guessing Numbers (GN)}{12}{0}{6}
-\beamer@sectionintoc {7}{Key Findings}{15}{0}{7}
+\beamer@sectionintoc {3}{Why AllSuspects \& Ensemble Fail}{6}{0}{3}
+\beamer@sectionintoc {4}{DQS — Deliberative Question Selection}{9}{0}{4}
+\beamer@sectionintoc {5}{Guessing Numbers (GN)}{12}{0}{5}
+\beamer@sectionintoc {6}{Key Findings}{16}{0}{6}
