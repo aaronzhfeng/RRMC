@@ -41,8 +41,10 @@ from ..methods.stopping_rules import (
     KnowNoStopping,
     CIPLiteStopping,
     UoTLiteStopping,
+    AllSuspectsWrapper,
 )
 from ..methods.question_selector import VoIQuestionSelector, QuestionSelectionResult
+from ..methods.trajectory_ensemble import TrajectoryEnsemble, TrajectoryResult, EnsembleResult
 
 
 # =============================================================================
@@ -542,6 +544,14 @@ class RRMCEvaluator:
         if hasattr(stopping_rule, "clone") and callable(getattr(stopping_rule, "clone")):
             return stopping_rule.clone()
 
+        # Handle AllSuspectsWrapper by cloning inner rule and re-wrapping
+        if isinstance(stopping_rule, AllSuspectsWrapper):
+            cloned_inner = self._clone_stopping_rule(stopping_rule.inner_rule)
+            return AllSuspectsWrapper(
+                inner_rule=cloned_inner,
+                enabled=stopping_rule.enabled,
+            )
+
         if isinstance(stopping_rule, FixedTurnsStopping):
             return FixedTurnsStopping(
                 llm=stopping_rule.llm,
@@ -686,21 +696,36 @@ class RRMCEvaluator:
                         question, suspect = generated, None
                     if not question:
                         question, suspect = self._generate_question(state, conv_manager, turn)
+                    if self.task_type == TaskType.DC:
+                        result = self.env.step(ActionASK(question=question, suspect=suspect))
+                    else:
+                        result = self.env.step(ActionASK(question=question))
+                elif self.question_selector is not None and self.task_type in (
+                    TaskType.DC, TaskType.GN
+                ):
+                    # DQS / VoI question selector
+                    selection = self.question_selector.select_question(
+                        task_type=task_type_str,
+                        state=state,
+                        current_mi=decision.score,
+                    )
+                    question = selection.selected.question
+                    suspect = selection.selected.suspect or None
+                    if self.task_type == TaskType.DC:
+                        result = self.env.step(ActionASK(question=question, suspect=suspect))
+                    else:
+                        result = self.env.step(ActionASK(question=question))
                 else:
                     # Use conversation manager for proper multi-turn conversation
                     if self.task_type == TaskType.DC:
                         question, suspect = conv_manager.generate_question(turn)
+                        result = self.env.step(ActionASK(question=question, suspect=suspect))
                     elif self.task_type == TaskType.SP:
                         question = conv_manager.generate_question(turn)
-                        suspect = None
+                        result = self.env.step(ActionASK(question=question))
                     else:  # GN
                         question = conv_manager.generate_guess(turn)
-                        suspect = None
-                
-                if self.task_type == TaskType.DC:
-                    result = self.env.step(ActionASK(question=question, suspect=suspect))
-                else:
-                    result = self.env.step(ActionASK(question=question))
+                        result = self.env.step(ActionASK(question=question))
                 
                 # Add NPC feedback to conversation manager
                 if conv_manager is not None:
@@ -1007,7 +1032,7 @@ class RRMCEvaluator:
             else:
                 # Generate and ask question
                 if self.task_type == TaskType.DC and self.question_selector is not None:
-                    # Use VoI question selector
+                    # Use DQS / VoI question selector (DC)
                     current_mi = decision.score
                     selection = self.question_selector.select_question(
                         task_type=task_type_str,
@@ -1017,6 +1042,16 @@ class RRMCEvaluator:
                     question = selection.selected.question
                     suspect = selection.selected.suspect
                     result = env.step(ActionASK(question=question, suspect=suspect))
+                    conv_manager.add_feedback(result.observation)
+                elif self.task_type == TaskType.GN and self.question_selector is not None:
+                    # Use DQS question selector (GN)
+                    selection = self.question_selector.select_question(
+                        task_type=task_type_str,
+                        state=state,
+                        current_mi=decision.score,
+                    )
+                    guess = selection.selected.question
+                    result = env.step(ActionASK(question=guess))
                     conv_manager.add_feedback(result.observation)
                 elif self.task_type == TaskType.DC:
                     question, suspect = conv_manager.generate_question(turn)
@@ -1098,7 +1133,7 @@ class RRMCEvaluator:
         method_name = results[0].method
         correct_count = sum(1 for r in results if r.correct)
         total_turns = sum(r.turns_used for r in results)
-
+        
         accuracy = correct_count / len(puzzle_indices) if puzzle_indices else 0.0
         avg_turns = total_turns / len(puzzle_indices) if puzzle_indices else 0.0
         std_turns = np.std([r.turns_used for r in results]) if results else 0.0
@@ -1128,6 +1163,147 @@ class RRMCEvaluator:
         eval_result.accuracy_ci = acc_ci
         eval_result.turns_ci = turns_ci_result
         return eval_result
+
+    def evaluate_method_ensemble(
+        self,
+        stopping_rule: BaseStoppingRule,
+        ensemble: TrajectoryEnsemble,
+        puzzle_indices: Optional[List[int]] = None,
+        verbose: bool = True,
+    ) -> EvaluationResult:
+        """
+        Evaluate a stopping rule using trajectory ensemble on multiple puzzles.
+
+        For each puzzle, runs N independent trajectories with varying temperatures,
+        then aggregates via majority vote.
+
+        Args:
+            stopping_rule: Base stopping rule (will be cloned per trajectory)
+            ensemble: TrajectoryEnsemble configuration
+            puzzle_indices: Which puzzles to run
+            verbose: Whether to print progress
+
+        Returns:
+            EvaluationResult with aggregated metrics
+        """
+        if puzzle_indices is None:
+            puzzle_indices = list(range(len(self.env)))
+
+        method_name = f"Ensemble({type(stopping_rule).__name__})"
+        if verbose:
+            print(f"\nEvaluating {method_name} on {len(puzzle_indices)} puzzles "
+                  f"({ensemble.n_trajectories} trajectories each)...")
+
+        temperatures = ensemble.generate_temperatures()
+        results = []
+        correct_count = 0
+        total_turns = 0
+
+        puzzle_iter = tqdm(
+            puzzle_indices,
+            desc=f"  {method_name[:20]}",
+            leave=False,
+            disable=not verbose,
+        )
+        for puzzle_idx in puzzle_iter:
+            traj_results: List[TrajectoryResult] = []
+
+            for traj_id in range(ensemble.n_trajectories):
+                temp = temperatures[traj_id]
+
+                # Create a fresh env and cloned stopping rule for this trajectory
+                thread_env = ARBenchEnv(
+                    task_type=self.task_type,
+                    data_path=self.data_path,
+                    llm=self.llm,
+                    max_turns=self.max_turns,
+                )
+                local_rule = self._clone_stopping_rule(stopping_rule)
+
+                # Run episode with modified temperature
+                episode = self._run_episode_with_env(
+                    puzzle_idx, local_rule, thread_env
+                )
+
+                traj_results.append(TrajectoryResult(
+                    trajectory_id=traj_id,
+                    final_answer=str(episode.prediction),
+                    turns_used=episode.turns_used,
+                    history=episode.history,
+                    confidence=1.0 if episode.correct else 0.0,
+                    stopping_reason=episode.decisions[-1]["reason"] if episode.decisions else "max_turns",
+                ))
+
+                # Early consensus check
+                if ensemble.early_consensus and ensemble.check_early_consensus(traj_results):
+                    break
+
+            # Aggregate trajectory results
+            ensemble_result = ensemble.aggregate_results(traj_results)
+
+            # Determine correctness: compare ensemble answer to ground truth
+            # We need ground truth — get it from a fresh env reset
+            check_env = ARBenchEnv(
+                task_type=self.task_type,
+                data_path=self.data_path,
+                llm=self.llm,
+                max_turns=self.max_turns,
+            )
+            check_env.reset(puzzle_idx)
+            ground_truth = check_env.get_ground_truth()
+
+            # Determine correctness based on task type
+            if self.task_type == TaskType.DC:
+                # final_answer is already a 0-indexed string from trajectory predictions
+                # Don't re-parse it (that would treat "2" as 1-based and return 1)
+                try:
+                    pred_idx = int(ensemble_result.final_answer)
+                except (ValueError, TypeError):
+                    # Fallback: if somehow it's a name, parse it
+                    suspect_names = check_env.get_state().get("suspect_names", [])
+                    pred_idx = check_env._parse_dc_answer(ensemble_result.final_answer, suspect_names)
+                correct = pred_idx == ground_truth
+                prediction = pred_idx
+            elif self.task_type == TaskType.GN:
+                import re as _re
+                guess = _re.sub(r'[^0-9]', '', str(ensemble_result.final_answer))[:4]
+                gt = _re.sub(r'[^0-9]', '', str(ground_truth))[:4]
+                correct = guess == gt
+                prediction = guess
+            else:
+                correct = ensemble_result.final_answer == ground_truth
+                prediction = ensemble_result.final_answer
+
+            episode_result = EpisodeResult(
+                puzzle_idx=puzzle_idx,
+                method=method_name,
+                correct=correct,
+                prediction=prediction,
+                ground_truth=ground_truth,
+                turns_used=int(ensemble_result.avg_turns),
+                mi_scores=[],
+                decisions=[{
+                    "ensemble_consensus": ensemble_result.consensus_count,
+                    "ensemble_total": ensemble_result.total_trajectories,
+                    "ensemble_confidence": ensemble_result.confidence,
+                }],
+                total_time=0.0,
+                history=[],
+            )
+            results.append(episode_result)
+
+            if correct:
+                correct_count += 1
+            total_turns += int(ensemble_result.avg_turns)
+
+            acc = correct_count / len(results)
+            puzzle_iter.set_postfix(
+                acc=f"{acc:.0%}",
+                turns=f"{total_turns/len(results):.1f}",
+                cons=f"{ensemble_result.confidence:.0%}",
+            )
+
+        return self._build_evaluation_result(results, puzzle_indices, verbose)
 
     def run_comparison(
         self,

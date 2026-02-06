@@ -18,7 +18,10 @@ from rrmc.core.clustering import SemanticClusterer
 from rrmc.core.mi_estimator import RobustMI
 from rrmc.evaluation.evaluator import RRMCEvaluator, print_comparison_table
 from rrmc.methods import get_method
+from rrmc.methods.stopping_rules import AllSuspectsWrapper
+from rrmc.methods.trajectory_ensemble import TrajectoryEnsemble
 from rrmc.methods.question_selector import VoIQuestionSelector
+from rrmc.methods.dqs import DQSQuestionSelector
 
 
 class Pipeline:
@@ -183,9 +186,26 @@ class Pipeline:
 
         max_workers = self.config.get("max_workers", 8)
 
-        # Create VoI question selector if enabled (DC only)
+        # Create question selector if enabled (DC only)
         question_selector = None
-        if self.config.get("use_voi", False) and task_str == "dc":
+
+        if self.config.get("use_dqs", False) and task_str in ("dc", "gn"):
+            # DQS (Deliberative Question Selection)
+            # DC: LLM-based branch evaluation
+            # GN: deterministic entropy-based scoring (no extra LLM calls)
+            question_selector = DQSQuestionSelector(
+                llm=self.llm,
+                m_candidates=self.config.get("dqs_m_candidates", 5),
+                r_simulations=self.config.get("dqs_r_simulations", 2),
+                temperature=self.config.get("dqs_temperature", 0.7),
+                eval_temperature=self.config.get("dqs_eval_temperature", 0.3),
+            )
+            if verbose:
+                mode = "entropy" if task_str == "gn" else "LLM-eval"
+                print(f"DQS question selection ({mode}): M={question_selector.m_candidates}")
+
+        elif self.config.get("use_voi", False) and task_str == "dc":
+            # VoI (Value of Information) – MI-based branch scoring
             clusterer = SemanticClusterer(use_entailment=False)
             robust_mi = RobustMI(
                 llm=self.llm,
@@ -395,15 +415,49 @@ class Pipeline:
             print("STARTING EVALUATION")
             print("=" * 60)
 
+        # Check if trajectory ensemble is enabled
+        ensemble_cfg = self.config.get("trajectory_ensemble", None)
+        ensemble_enabled = False
+        ensemble = None
+        if ensemble_cfg is not None:
+            if isinstance(ensemble_cfg, dict):
+                ensemble_enabled = ensemble_cfg.get("enabled", False)
+            else:
+                # Config object
+                ensemble_enabled = getattr(ensemble_cfg, "enabled", False)
+
+        if ensemble_enabled:
+            # Extract ensemble parameters
+            if isinstance(ensemble_cfg, dict):
+                ecfg = ensemble_cfg
+            else:
+                ecfg = ensemble_cfg.to_dict() if hasattr(ensemble_cfg, "to_dict") else {}
+
+            ensemble = TrajectoryEnsemble(
+                n_trajectories=ecfg.get("n_trajectories", 6),
+                consensus_threshold=ecfg.get("consensus_threshold", 0.5),
+                early_consensus=ecfg.get("early_consensus", True),
+                temperature_range=tuple(ecfg.get("temperature_range", [0.5, 1.0])),
+            )
+
         results = {}
         for method_name in methods:
             method_cfg = get_method_config(method_name)
             stopping_rule = self._create_method(method_name, method_cfg)
-            results[method_name] = self.evaluator.evaluate_method(
-                stopping_rule=stopping_rule,
-                puzzle_indices=puzzle_indices,
-                verbose=verbose,
-            )
+
+            if ensemble_enabled and ensemble is not None:
+                results[method_name] = self.evaluator.evaluate_method_ensemble(
+                    stopping_rule=stopping_rule,
+                    ensemble=ensemble,
+                    puzzle_indices=puzzle_indices,
+                    verbose=verbose,
+                )
+            else:
+                results[method_name] = self.evaluator.evaluate_method(
+                    stopping_rule=stopping_rule,
+                    puzzle_indices=puzzle_indices,
+                    verbose=verbose,
+                )
 
         # Save and print
         self.evaluator._save_results(results)
@@ -492,7 +546,16 @@ class Pipeline:
                 "k_samples", method_cfg.get("k_samples", 6)
             )
 
-        return get_method(method_name, **kwargs)
+        stopping_rule = get_method(method_name, **kwargs)
+
+        # Wrap with AllSuspectsWrapper if configured (DC only)
+        if self.config.get("require_all_suspects", False):
+            stopping_rule = AllSuspectsWrapper(
+                inner_rule=stopping_rule,
+                enabled=True,
+            )
+
+        return stopping_rule
 
     def _print_calibration_summary(self, calibration: Dict[str, Any]):
         """Print calibration summary."""

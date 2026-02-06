@@ -30,6 +30,7 @@ class StoppingDecision:
     reason: str
     score: float  # Uncertainty score
     prediction: Optional[str] = None  # Predicted answer if stopping
+    metadata: Optional[Dict[str, Any]] = None  # Extra info (e.g. remaining suspects)
 
 
 class BaseStoppingRule(ABC):
@@ -901,3 +902,56 @@ List only plausible answers:"""
                 if answer:
                     answers.append(answer)
         return answers if answers else [text.strip()]
+
+
+class AllSuspectsWrapper(BaseStoppingRule):
+    """
+    Wrapper that enforces questioning all suspects before allowing stop.
+
+    Wraps any existing stopping rule and overrides should_stop() to
+    return False until all suspects have been questioned at least once.
+    Only applies to DC (detective_cases) task.
+    """
+
+    def __init__(
+        self,
+        inner_rule: BaseStoppingRule,
+        enabled: bool = True,
+    ):
+        super().__init__(inner_rule.max_turns)
+        self.inner_rule = inner_rule
+        self.enabled = enabled
+
+    def should_stop(
+        self,
+        task_type: str,
+        state: Dict[str, Any],
+        turn: int,
+    ) -> StoppingDecision:
+        # Only apply to DC task when enabled
+        if self.enabled and task_type.upper() in ("DC", "DETECTIVE_CASES"):
+            suspects = set(state.get("suspect_names", []))
+            if suspects:
+                questioned = self._get_questioned_suspects(state)
+                remaining = suspects - questioned
+
+                if remaining:
+                    return StoppingDecision(
+                        should_stop=False,
+                        reason="not_all_suspects_questioned",
+                        score=float(len(remaining)),
+                        prediction=None,
+                        metadata={"remaining_suspects": sorted(remaining)},
+                    )
+
+        # All suspects questioned (or disabled/not DC) — delegate to inner rule
+        return self.inner_rule.should_stop(task_type, state, turn)
+
+    @staticmethod
+    def _get_questioned_suspects(state: Dict[str, Any]) -> set:
+        """Extract suspects that have been questioned from history."""
+        history = state.get("history", [])
+        return {r.get("suspect") for r in history if r.get("suspect")}
+
+    def get_best_answer(self, task_type: str, state: Dict[str, Any]) -> str:
+        return self.inner_rule.get_best_answer(task_type, state)

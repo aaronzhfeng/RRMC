@@ -54,6 +54,8 @@ def main(
     regime: Optional[str] = None,
     # Concurrency settings
     max_workers: Optional[int] = None,
+    # Improvement features
+    require_all_suspects: Optional[bool] = None,
     # Output settings
     output_dir: Optional[str] = None,
     verbose: bool = True,
@@ -124,6 +126,8 @@ def main(
         overrides["max_workers"] = max_workers
     if output_dir is not None:
         overrides["output_dir"] = output_dir
+    if require_all_suspects is not None:
+        overrides["require_all_suspects"] = require_all_suspects
 
     # Handle verbose/quiet
     overrides["verbose"] = verbose and not quiet

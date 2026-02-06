@@ -17,6 +17,7 @@ from .stopping_rules import (
     KnowNoStopping,
     CIPLiteStopping,
     UoTLiteStopping,
+    AllSuspectsWrapper,
 )
 
 

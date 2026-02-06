@@ -375,11 +375,17 @@ class SelfRevisionMI:
             if json_match:
                 data = json.loads(json_match.group())
                 if task_type == "DC":
-                    return data.get("suspect", response)
+                    result = data.get("suspect", response)
                 elif task_type == "SP":
-                    return data.get("explanation", response)
+                    result = data.get("explanation", response)
                 elif task_type == "GN":
-                    return data.get("guess", response)
+                    result = data.get("guess", response)
+                else:
+                    result = response
+                # Ensure we return a string (handle list responses)
+                if isinstance(result, list):
+                    result = result[0] if result else response
+                return str(result)
         except (json.JSONDecodeError, KeyError):
             pass
 
