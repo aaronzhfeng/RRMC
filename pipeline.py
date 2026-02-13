@@ -513,6 +513,9 @@ class Pipeline:
             kwargs["mi_threshold"] = self.config.get(
                 "mi_threshold", method_cfg.get("mi_threshold", 0.3)
             )
+            kwargs["min_turns"] = self.config.get(
+                "min_turns", method_cfg.get("min_turns", 0)
+            )
         elif method_name == "robust_mi":
             kwargs["k_samples"] = self.config.get("k_samples", method_cfg.get("k_samples", 4))
             kwargs["threshold"] = self.config.get(
@@ -527,6 +530,9 @@ class Pipeline:
             if isinstance(variants, str):
                 variants = [v.strip() for v in variants.split(",")]
             kwargs["variants"] = variants
+            kwargs["min_turns"] = self.config.get(
+                "min_turns", method_cfg.get("min_turns", 0)
+            )
         elif method_name == "knowno":
             kwargs["k_samples"] = self.config.get(
                 "k_samples", method_cfg.get("k_samples", 10)

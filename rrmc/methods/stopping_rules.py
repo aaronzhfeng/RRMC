@@ -462,6 +462,8 @@ class MIOnlyStopping(BaseStoppingRule):
     MI-only stopping rule (without robustness).
 
     Uses single-variant self-revision MI with fixed threshold.
+    Supports min_turns to prevent premature stopping before
+    enough evidence has been gathered.
     """
 
     def __init__(
@@ -472,6 +474,7 @@ class MIOnlyStopping(BaseStoppingRule):
         k_samples: int = 6,
         max_turns: int = 25,
         temperature: float = 0.7,
+        min_turns: int = 0,
     ):
         super().__init__(max_turns)
         self.mi_estimator = SelfRevisionMI(
@@ -481,6 +484,7 @@ class MIOnlyStopping(BaseStoppingRule):
             temperature=temperature,
         )
         self.mi_threshold = mi_threshold
+        self.min_turns = min_turns
         self._last_estimate: Optional[MIEstimate] = None
 
     def should_stop(
@@ -497,13 +501,22 @@ class MIOnlyStopping(BaseStoppingRule):
                 prediction=self.get_best_answer(task_type, state),
             )
 
-        # Estimate MI (single variant)
+        # Estimate MI (single variant) — always compute for diagnostics
         estimate = self.mi_estimator.estimate(
             task_type=task_type,
             state=state,
             revision_variant="base",
         )
         self._last_estimate = estimate
+
+        # Before min_turns, continue investigating regardless of MI
+        if turn < self.min_turns:
+            return StoppingDecision(
+                should_stop=False,
+                reason="below_min_turns",
+                score=estimate.mi,
+                prediction=None,
+            )
 
         should_stop = estimate.mi <= self.mi_threshold
 
@@ -536,6 +549,8 @@ class RobustMIStopping(BaseStoppingRule):
     Robust MI stopping rule with risk-controlled threshold.
 
     Uses multiple prompt variants and calibrated threshold.
+    Supports min_turns to prevent premature stopping before
+    enough evidence has been gathered.
     """
 
     def __init__(
@@ -549,6 +564,7 @@ class RobustMIStopping(BaseStoppingRule):
         variants: Optional[List[str]] = None,
         use_diversity_sampling: bool = True,
         regime: str = "normal",
+        min_turns: int = 0,
     ):
         super().__init__(max_turns)
         self.robust_mi = RobustMI(
@@ -562,6 +578,7 @@ class RobustMIStopping(BaseStoppingRule):
         self.threshold = threshold
         self.variants = variants
         self.regime = regime
+        self.min_turns = min_turns
         self._last_mi: float = 0.0
         self._last_estimates: Dict[str, MIEstimate] = {}
 
@@ -579,7 +596,7 @@ class RobustMIStopping(BaseStoppingRule):
                 prediction=self.get_best_answer(task_type, state),
             )
 
-        # Estimate robust MI
+        # Estimate robust MI — always compute for diagnostics
         robust_mi, estimates = self.robust_mi.estimate(
             task_type=task_type,
             state=state,
@@ -587,6 +604,15 @@ class RobustMIStopping(BaseStoppingRule):
         )
         self._last_mi = robust_mi
         self._last_estimates = estimates
+
+        # Before min_turns, continue investigating regardless of MI
+        if turn < self.min_turns:
+            return StoppingDecision(
+                should_stop=False,
+                reason="below_min_turns",
+                score=robust_mi,
+                prediction=None,
+            )
 
         should_stop = robust_mi <= self.threshold
 

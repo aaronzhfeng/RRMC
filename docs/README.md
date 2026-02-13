@@ -34,6 +34,15 @@
 |------|-------------|
 | **`08_proposed_improvements.md`** | Proposed fixes for Turn-1 stopping problem: (A) prompt-based, (B) code-enforced suspect questioning, (C) partial trajectory, (D) full trajectory ensemble. |
 
+## Case Studies & Results
+
+| File | Description |
+|------|-------------|
+| **`09_case_study_mi_stopping.md`** | MI stopping analysis: 80% on 5 puzzles collapsed to 25% on 20 puzzles. |
+| **`10_case_study_allsuspects_ensemble.md`** | AllSuspects and Ensemble failure modes on DC. |
+| **`11_results_summary_and_next_steps.md`** | **Full results ranking (DC/GN/SP) and prioritized experiment plan for 100-puzzle scaling.** |
+| **`12_experiment_plan_100puzzles.md`** | **Detailed experiment matrix, method rescue analysis (MI/Ensemble/AllSuspects), implementation checklist.** |
+
 ## Execution Logs
 
 Detailed task execution history is tracked in `../prompt/`:

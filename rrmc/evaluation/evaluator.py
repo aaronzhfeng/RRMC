@@ -591,6 +591,7 @@ class RRMCEvaluator:
                 k_samples=mi_estimator.k_samples,
                 max_turns=stopping_rule.max_turns,
                 temperature=mi_estimator.temperature,
+                min_turns=stopping_rule.min_turns,
             )
         if isinstance(stopping_rule, RobustMIStopping):
             mi_estimator = stopping_rule.robust_mi.mi_estimator
@@ -604,6 +605,7 @@ class RRMCEvaluator:
                 variants=stopping_rule.variants,
                 use_diversity_sampling=stopping_rule.robust_mi.use_diversity_sampling,
                 regime=stopping_rule.regime,
+                min_turns=stopping_rule.min_turns,
             )
 
         return stopping_rule
